@@ -1,7 +1,7 @@
 const scope=self.registration.scope;
 const prefix='fieldledger-lite:'+encodeURIComponent(new URL(scope).pathname)+':';
-const cacheName=prefix+'0.1.0-preview.2';
-const shell=['index.html','mark.svg','headquarters.png','app.css','app.mjs','core.mjs','views.mjs','sample.mjs','vault.mjs','interop.mjs','payroll-rules.mjs'];
+const cacheName=prefix+'a54482b1ec0fdbc9bd90';
+const shell=["terms.mjs","terms-ui.mjs","terms-entry.mjs","terms.css","index.html","mark.svg","headquarters.png","app.css","app.mjs","core.mjs","views.mjs","sample.mjs","vault.mjs","interop.mjs","payroll-rules.mjs","terms.json","privacy.html","privacy.css"];
 const urls=shell.map(name=>new URL(name,scope).href);
 self.addEventListener('install',event=>event.waitUntil((async()=>{
   const cache=await caches.open(cacheName);
@@ -13,8 +13,12 @@ self.addEventListener('activate',event=>event.waitUntil((async()=>{
   await self.clients.claim();
 })()));
 self.addEventListener('fetch',event=>{
+  // Check the published agreement even while an older app shell controls this tab.
+  if (event.request.url === new URL('terms.json?current', self.registration.scope).href) return;
+
   const req=event.request;if(req.method!=='GET')return;
-  const key=req.url===scope?urls[0]:req.url;
+  const url=new URL(req.url); url.hash='';
+  const key=url.href===scope?new URL('index.html',scope).href:url.href;
   if(!urls.includes(key))return;
   event.respondWith((async()=>{const cache=await caches.open(cacheName);return await cache.match(key)||fetch(req);})());
 });
