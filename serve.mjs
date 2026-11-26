@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {resolve,extname} from 'node:path';
 const root=fileURLToPath(new URL('.',import.meta.url));
-const allowed=new Set(['index.html','terms.mjs','terms-ui.mjs','terms-entry.mjs','terms.css','mark.svg','headquarters.png','app.css','app.mjs','core.mjs','desk-core.mjs','desk-views.mjs','views.mjs','sample.mjs','vault.mjs','interop.mjs','payroll-rules.mjs','terms.json','privacy.html','privacy.css','consent.mjs','LICENSE','THIRD-PARTY-NOTICES.md','sw.js']);
+const allowed=new Set(['index.html','terms.mjs','terms-ui.mjs','terms-entry.mjs','terms.css','mark.svg','headquarters.png','app.css','app.mjs','core.mjs','desk-core.mjs','desk-views.mjs','warehouse-desk.mjs','planning-core.mjs','planning-views.mjs','views.mjs','sample.mjs','vault.mjs','interop.mjs','payroll-rules.mjs','manual-payroll.mjs','manual-payroll-ui.mjs','terms.json','privacy.html','privacy.css','consent.mjs','LICENSE','THIRD-PARTY-NOTICES.md','sw.js']);
 export function createLiteServer(){return createServer(async(req,res)=>{
  try{if(!['GET','HEAD'].includes(req.method)){res.writeHead(405,{'Allow':'GET, HEAD'});res.end();return;}
   const pathname=decodeURIComponent(new URL(req.url,'http://localhost').pathname),name=pathname==='/'?'index.html':pathname.slice(1);if(!allowed.has(name)){res.writeHead(404);res.end('Not found');return;}

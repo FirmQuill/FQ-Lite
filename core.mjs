@@ -1,5 +1,7 @@
+import {validateManualPayroll} from './manual-payroll.mjs';
 // ERP Lite portable format v1. Currency is USD; journal amounts are signed cents (debit positive).
 import {deskTypes,applyDesk,validateDesk} from './desk-core.mjs';
+import {validatePlanning} from './planning-core.mjs';
 export const VERSION = '0.4.0-preview.1';
 export const activities = ['products','jobs','time','stock','employees'];
 export const modules = ['Sales','Purchasing','Projects','Contracts & legal','Jobs & time','Assets & pallets','Warehouse','Assembly','Fixed assets','Accounting','Banking','Reports','Payroll'];
@@ -61,17 +63,96 @@ function event(c,kind,when,label){return {id:id(),number:++c.sequence,kind,date:
 const lines2=(a,b,n)=>[[a,n],[b,-n]];
 const receivable=d=>d.kind==='invoice';
 export function outstanding(c,d){return sum([d.total,...c.docs.filter(x=>x.parent===d.id&&['collection','payment','sales credit','vendor credit'].includes(x.kind)).map(x=>-x.applied)]);}
+// Old documents remain unchanged. New line IDs are stable within the source chain.
+export const documentLines=d=>d.lines||[{lineId:'legacy',item:d.item,qty:d.qty,unit:d.unit,discount:0,total:d.total,location:d.location}];
+const quantitySteps=['fulfillment','receiving','sales credit','vendor credit'];
+const commercialSourceKind={'sales order':'quote','fulfillment':'sales order','invoice':'fulfillment','receiving':'purchase order','bill':'receiving','sales credit':'invoice','vendor credit':'bill'};
+function consumed(children,kind){
+  const result=new Map();for(const child of children)if(child.kind===kind)for(const row of documentLines(child))result.set(row.lineId,sum([result.get(row.lineId)||0,row.qty]));return result;
+}
+export function availableDocumentLines(c,p,kind){
+  const used=p.lines&&quantitySteps.includes(kind)?consumed(c.docs.filter(x=>x.parent===p.id),kind):new Map();
+  return documentLines(p).map(l=>({...l,remaining:l.qty-(used.get(l.lineId)||0)})).filter(l=>l.remaining>0);
+}
+function lineMoney(q,u){return integer(Number(BigInt(q)*BigInt(u)));}
+function sumDoc(e,lines){
+  const first=lines[0];Object.assign(e,{lines,item:first.item,qty:first.qty,unit:first.unit,location:first.location,total:sum(lines.map(l=>l.total))});
+}
+function originalLine(c,l,index,location){
+  const item=byId(c.items,l.item).id,qty=positive(l.qty),unit=positive(l.unit),gross=lineMoney(qty,unit),discount=integer(l.discount??0);
+  check(discount>=0&&discount<gross,'A line discount must be nonnegative and less than the line subtotal.');
+  return {lineId:'L'+(index+1),item,qty,unit,discount,total:gross-discount,location:name(l.location||location||'Main')};
+}
+function selectedLines(c,p,type,request){
+  const remaining=availableDocumentLines(c,p,type);
+  const selected=request===undefined?remaining.map(l=>({lineId:l.lineId,qty:l.remaining})):request;
+  check(Array.isArray(selected)&&selected.length>0&&selected.length<=remaining.length&&new Set(selected.map(l=>l.lineId)).size===selected.length,'Choose at least one distinct available line.');
+  return selected.map(q=>{
+    const l=byId(remaining.map(r=>({...r,id:r.lineId})),q.lineId),qty=positive(q.qty);
+    check(qty<=l.remaining,'Quantity exceeds the remaining line quantity.');
+    const used=l.qty-l.remaining;
+    const discount=ratio(l.discount,used+qty,l.qty)-ratio(l.discount,used,l.qty);
+    const cost=l.cost===undefined?undefined:ratio(l.cost,used+qty,l.qty)-ratio(l.cost,used,l.qty);
+    return {lineId:l.lineId,item:l.item,qty,unit:l.unit,discount,total:lineMoney(qty,l.unit)-discount,location:l.location,...(cost===undefined?{}:{cost})};
+  });
+}
+function multiCommerce(c,a,e,p){
+  if(!p){
+    const party=byId(c.parties,a.party);check(party.kind===(a.type==='quote'?'Customer':'Vendor'),'Select a matching contact.');if(a.job)byId(c.jobs,a.job);
+    check(Array.isArray(a.lines)&&a.lines.length>0&&a.lines.length<=100,'Enter one to 100 item lines.');
+    e.party=party.id;e.job=a.job||'';sumDoc(e,a.lines.map((l,i)=>originalLine(c,l,i,a.location)));return;
+  }
+  e.parent=p.id;e.party=p.party;e.job=p.job;
+  const type=a.type,settlement=type==='collection'||type==='payment',credit=type==='sales credit'||type==='vendor credit';
+  if(settlement){
+    check(a.lines===undefined,'A settlement records an amount, not selected lines.');
+    Object.assign(e,{item:p.item,qty:p.qty,unit:p.unit,location:p.location});
+    e.applied=positive(a.amount);check(e.applied<=outstanding(c,p),'Amount exceeds open balance.');e.total=e.applied;
+    journal(c,e,type==='collection'?lines2('1000','1100',e.applied):lines2('2000','1000',e.applied));return;
+  }
+  check(quantitySteps.includes(type)||a.lines===undefined,'This operation copies all source lines.');
+  const rows=quantitySteps.includes(type)?selectedLines(c,p,type,a.lines):structuredClone(p.lines);
+  const jl=[], product=l=>byId(c.items,l.item).kind==='Product';
+  if(type==='fulfillment')for(const l of rows)if(product(l)){l.cost=removeStock(c,e,l.item,l.location,l.qty);jl.push(...lines2('5000','1200',l.cost));}
+  if(type==='receiving')for(const l of rows)if(product(l)){move(c,e,l.item,l.location,l.qty,l.total);jl.push(...lines2('1200','2050',l.total));}
+  sumDoc(e,rows);
+  if(type==='invoice')jl.push(...lines2('1100','4000',e.total));
+  if(type==='bill')for(const l of rows)jl.push(...lines2(product(l)?'2050':'5100','2000',l.total));
+  if(credit){
+    check(c.docs.filter(x=>x.parent===p.id).every(x=>x.date<=e.date),'Credit date precedes an existing settlement.');
+    e.applied=Math.min(e.total,outstanding(c,p));e.refund=e.total-e.applied;
+    const sales=type==='sales credit';
+    jl.push(...(sales?[['4000',e.total],['1100',-e.applied],['1000',-e.refund]]:[['2000',e.applied],['1000',e.refund]]));
+    for(const l of rows){
+      if(product(l)){
+        if(sales){move(c,e,l.item,l.location,l.qty,l.cost);jl.push(...lines2('1200','5000',l.cost));}
+        else {const cost=removeStock(c,e,l.item,l.location,l.qty);jl.push(['1200',-cost],['5200',cost-l.total]);}
+      } else if(!sales)jl.push(['5100',-l.total]);
+    }
+  }
+  journal(c,e,jl);
+}
 function child(c,p,kind){return c.docs.find(x=>x.parent===p.id&&x.kind===kind);}
 export function nextSteps(c,p){
   const chain={quote:'sales order','sales order':'fulfillment',fulfillment:'invoice','purchase order':'receiving',receiving:'bill'};
-  if(chain[p.kind])return child(c,p,chain[p.kind])?[]:[chain[p.kind]];
+  if(chain[p.kind]){
+    const kind=chain[p.kind],open=p.lines&&quantitySteps.includes(kind)?availableDocumentLines(c,p,kind).length>0:!child(c,p,kind);
+    return open?[kind]:[];
+  }
   if(['invoice','bill'].includes(p.kind)){
     const sale=receivable(p), credit=sale?'sales credit':'vendor credit';
-    return [...(outstanding(c,p)>0?[sale?'collection':'payment']:[]),...(child(c,p,credit)?[]:[credit])];
+    return [...(outstanding(c,p)>0?[sale?'collection':'payment']:[]),...((p.lines?availableDocumentLines(c,p,credit).length>0:!child(c,p,credit))?[credit]:[])];
   }
   return [];
 }
 function commerce(c,a,e){
+  const source=a.parent?byId(c.docs,a.parent):null;
+  if(['quote','purchase order'].includes(a.type))check(!source,'New commercial documents do not have a source.');
+  if(source?.lines||(!source&&['quote','purchase order'].includes(a.type)&&Object.hasOwn(a,'lines'))){
+    if(source){check(nextSteps(c,source).includes(a.type),'That step is already complete or unavailable.');check(e.date>=source.date,'Document date precedes its source.');}
+    multiCommerce(c,a,e,source);c.docs.push(e);return;
+  }
+  check(a.lines===undefined,'A legacy document must follow its original whole-document workflow.');
   if(['quote','purchase order'].includes(a.type)){
     const p=byId(c.parties,a.party), item=byId(c.items,a.item);
     check(p.kind===(a.type==='quote'?'Customer':'Vendor'),'Select a matching contact.');
@@ -266,7 +347,34 @@ export function validateState(s){
     for(const j of c.jobs)name(j.name);
     for(const p of c.employees){name(p.name);name(p.locality);positive(p.rate);check(/^[A-Z]{2}$/.test(p.state),'Invalid work state.');}
     for(const d of c.docs){check(commerceKinds.includes(d.kind),'Invalid document type.');date(d.date);}
-    for(const d of c.docs){byId(c.history,d.id);byId(c.items,d.item);byId(c.parties,d.party);if(d.parent)byId(c.docs,d.parent);if(d.job)byId(c.jobs,d.job);positive(d.qty);integer(d.total);}
+    const recordedHistory=new Map(c.history.map(e=>[e.id,e])),docIds=new Map(c.docs.map(d=>[d.id,d])),priorChildren=new Map();
+    for(const d of c.docs){const recorded=recordedHistory.get(d.id);check(recorded,'Commercial history is missing.');byId(c.items,d.item);byId(c.parties,d.party);if(d.parent)byId(c.docs,d.parent);if(d.job)byId(c.jobs,d.job);positive(d.qty);integer(d.total);
+      if(Object.hasOwn(d,'lines')){
+        check(Array.isArray(d.lines)&&d.lines.length>0&&d.lines.length<=100&&new Set(d.lines.map(l=>l.lineId)).size===d.lines.length,'Invalid commercial lines.');
+        for(const l of d.lines){check(/^L[1-9]\d{0,2}$/.test(l.lineId),'Invalid commercial line ID.');byId(c.items,l.item);name(l.location);positive(l.qty);positive(l.unit);check(integer(l.discount)>=0&&l.discount<=lineMoney(l.qty,l.unit)&&l.total===lineMoney(l.qty,l.unit)-l.discount,'Commercial line total does not balance.');if(l.cost!==undefined)check(integer(l.cost)>=0,'Invalid line cost.');}
+        const first=d.lines[0];check(d.item===first.item&&d.qty===first.qty&&d.unit===first.unit&&d.location===first.location&&d.total===sum(d.lines.map(l=>l.total)),'Commercial document total does not balance.');
+        check(recorded.kind===d.kind&&recorded.total===d.total&&JSON.stringify(recorded.lines)===JSON.stringify(d.lines),'Commercial lines differ from posting history.');
+        if(d.parent){
+          const source=docIds.get(d.parent);
+          check(source?.lines&&source.kind===commercialSourceKind[d.kind]&&source.party===d.party&&source.job===d.job&&source.date<=d.date&&source.number<d.number,'Commercial document is inconsistent with its source.');
+          const used=(priorChildren.get(d.parent)||new Map()).get(d.kind)||new Map();
+          if(!quantitySteps.includes(d.kind))check(!used.size&&JSON.stringify(d.lines)===JSON.stringify(source.lines),'Copied commercial lines differ from their source.');
+          else{
+            const src=new Map(source.lines.map(l=>[l.lineId,l]));
+            for(const line of d.lines){
+              const origin=src.get(line.lineId),q=used.get(line.lineId)||0,newQ=sum([q,line.qty]);
+              check(origin&&line.item===origin.item&&line.unit===origin.unit&&line.location===origin.location&&newQ<=origin.qty,'Commercial line is inconsistent with its source or over-processed.');
+              check(line.discount===ratio(origin.discount,newQ,origin.qty)-ratio(origin.discount,q,origin.qty),'Commercial discount differs from its source allocation.');
+              if(origin.cost!==undefined)check(line.cost===ratio(origin.cost,newQ,origin.qty)-ratio(origin.cost,q,origin.qty),'Commercial cost differs from its source allocation.');
+              if(d.kind==='fulfillment'&&byId(c.items,line.item).kind==='Product')check(Number.isSafeInteger(line.cost),'Fulfillment stock cost is missing.');
+            }
+          }
+          for(const line of d.lines)used.set(line.lineId,sum([used.get(line.lineId)||0,line.qty]));
+          if(!priorChildren.has(d.parent))priorChildren.set(d.parent,new Map());
+          priorChildren.get(d.parent).set(d.kind,used);
+        }else check(['quote','purchase order'].includes(d.kind),'Commercial document source is missing.');
+      }
+    }
     for(const e of c.entries){byId(c.history,e.source);date(e.date);check(e.lines.length>=2&&e.lines.every(l=>Object.hasOwn(accounts,l.account))&&sum(e.lines.map(l=>l.cents))===0,'Invalid posted journal.');}
     for(const t of c.time){date(t.date);byId(c.jobs,t.job);byId(c.employees,t.employee);positive(t.minutes);integer(t.cost);if(t.approved)byId(c.history,t.approval);}
     for(const m of c.moves){date(m.date);byId(c.history,m.source);byId(c.items,m.item);integer(m.qty);integer(m.value);}
@@ -275,6 +383,8 @@ export function validateState(s){
     for(const r of c.reconciliations){date(r.date);integer(r.opening);integer(r.closing);r.rows.forEach(k=>byId(c.bank,k));}
     for(const a of c.attachments)byId(c.history,a.source);
     validateDesk(c);
+    validatePlanning(c);
+    validateManualPayroll(c.manualPayroll,c);
     check(balance(c,'1200')===sum(c.moves.map(x=>x.value)),'Stock value differs from ledger.');
     check(balance(c,'1100')===sum(c.docs.filter(d=>d.kind==='invoice').map(d=>outstanding(c,d)))&&-balance(c,'2000')===sum(c.docs.filter(d=>d.kind==='bill').map(d=>outstanding(c,d))),'Open documents differ from ledger.');
   }

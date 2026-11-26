@@ -1,4 +1,4 @@
-import {accounts,balance,position,statements,consolidate,jobSummary,dollars,outstanding,nextSteps,sum} from './core.mjs';
+import {accounts,balance,position,statements,consolidate,jobSummary,dollars,outstanding,nextSteps,sum,documentLines,cents,check} from './core.mjs';
 
 const esc=x=>String(x??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const btn=(action,label,key='',cls='')=>`<button type="button" class="${esc(cls)}" data-act="${esc(action)}" data-key="${esc(key)}">${esc(label)}</button>`;
@@ -35,11 +35,40 @@ function contacts(c){
   return panel('Contacts',table(['Name','Role'],c.parties.map(p=>[esc(p.name),p.kind])),btn('contact','Add contact'))+
   panel('Items & services',table(['Description','Type'],c.items.map(i=>[esc(i.name),i.kind])),btn('item','Add item'));
 }
+export function documentEditor(c){
+  const row=`<fieldset class="document-line"><legend>Item line</legend>${select('item','Item or service',mapping(c.items))}${input('qty','Quantity','number',1,'min="1" step="1"')}${input('unit','Unit price (USD)','text','','inputmode="decimal"')}${input('discount','Line discount (USD)','text','0.00','inputmode="decimal"')}${input('location','Stock location','text','Main')}<button type="button" data-doc-line="remove">Remove line</button></fieldset>`;
+  return `<div data-doc-lines>${row}</div><template data-doc-line-template>${row}</template><button type="button" data-doc-line="add">Add item line</button>`;
+}
+export function handleDocumentLine(ev,dialog){
+  const clicked=ev.target.closest('[data-doc-line]');if(!clicked)return;
+  const rows=dialog.querySelector('[data-doc-lines]');if(!rows)return;
+  if(clicked.dataset.docLine==='add'&&rows.children.length<100){
+    const clone=dialog.querySelector('[data-doc-line-template]').content.cloneNode(true);const field=clone.querySelector('select');rows.appendChild(clone);field.focus();
+  }
+  if(clicked.dataset.docLine==='remove'&&rows.children.length>1){clicked.closest('.document-line').remove();dialog.querySelector('[data-doc-line="add"]').focus();}
+}
+export function parseDocumentLines(form){
+  const items=form.getAll('item'), quantities=form.getAll('qty'), unit=form.getAll('unit'), discount=form.getAll('discount'),location=form.getAll('location');
+  check(items.length===quantities.length&&items.length===unit.length&&items.length===discount.length&&items.length===location.length,'Commercial lines do not match.');
+  return items.map((item,i)=>({item,qty:Number(quantities[i]),unit:cents(unit[i]),discount:cents(discount[i]),location:location[i]}));
+}
+export function documentLineSelection(c,doc,step,available){
+  if(!doc.lines||!['fulfillment','receiving','sales credit','vendor credit'].includes(step))return '';
+  return `<fieldset><legend>Quantities to process</legend><p>Enter 0 to skip an item this time. Each quantity is limited to what remains.</p>${available.map(r=>input('pick-'+r.lineId,title(c.items,r.item)+' · '+r.location+' (max '+r.remaining+')','number',r.remaining,`min="0" max="${r.remaining}" step="1"`)).join('')}</fieldset>`;
+}
+export function parseSelectedDocumentLines(form){
+  const requested=[...form].filter(([k])=>k.startsWith('pick-'));
+  if(!requested.length)return {};
+  return {lines:requested.map(([k,q])=>({lineId:k.slice(5),qty:Number(q)})).filter(r=>r.qty!==0)};
+}
+export function commercialLineTable(c,d){
+  return table(['Item or service','Location','Units','Unit price','Discount','Line total'],documentLines(d).map(l=>[esc(title(c.items,l.item)),esc(l.location),l.qty,money(l.unit),money(l.discount),money(l.total)]))+line('Document total',d.total);
+}
 function commerceView(c,sales){
   const kinds=sales?['quote','sales order','fulfillment','invoice','collection','sales credit']:['purchase order','receiving','bill','payment','vendor credit'];
   const docs=c.docs.filter(d=>kinds.includes(d.kind)).toReversed();
   return panel(sales?'Sales documents':'Purchasing documents',table(['Record','Document','Contact / item','Total','Next step'],docs.map(d=>[
-    recordBtn(d),pretty(d.kind),`${esc(title(c.parties,d.party))}<br><small>${esc(title(c.items,d.item))} × ${d.qty}</small>`,money(d.total),
+    recordBtn(d),pretty(d.kind),`${esc(title(c.parties,d.party))}<br><small>${d.lines?.length>1?esc(d.lines.length+' item lines'):esc(title(c.items,d.item))+' × '+d.qty}</small>`,money(d.total),
     nextSteps(c,d).map(n=>btn('advance',pretty(n),d.id+'|'+n)).join('')||'Complete'
   ])),btn(sales?'quote':'purchase order',sales?'New quote':'New purchase order','','primary'))+
   panel(sales?'Open receivables':'Open payables',table(['Source','Contact','Open amount'],docs.filter(d=>d.kind===(sales?'invoice':'bill')&&outstanding(c,d)>0).map(d=>[recordBtn(d),esc(title(c.parties,d.party)),money(outstanding(c,d))]),'All posted documents are settled.'));

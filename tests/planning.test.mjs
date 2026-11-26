@@ -1,0 +1,54 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {newVault,apply,validateState} from '../core.mjs';
+import {catchUpPlanning,planningCommand,planningSummary,recurrenceDay,validatePlanning} from '../planning-core.mjs';
+const date='2026-01-01';
+function seed(){
+ let state=newVault('Planning fixtures'),company=state.companies[0].id;
+ const add=a=>state=apply(state,company,{...a,date});
+ add({type:'contact',name:'Customer',kind:'Customer'});add({type:'contact',name:'Vendor',kind:'Vendor'});
+ add({type:'item',name:'Service item',kind:'Service'});add({type:'job',name:'Project'});
+ add({type:'employee',name:'Worker',state:'WA',locality:'Locality',rate:3000});
+ return {state,company,first:state.companies[0]};
+}
+test('due draft scheduling preserves calendar anchor across short months, idempotency, pause and nonposting conversion',()=>{
+ const f=seed(),{first,company}=f;
+ assert.equal(recurrenceDay('2024-01-31','monthly',1),'2024-02-29');
+ assert.equal(recurrenceDay('2024-01-31','monthly',2),'2024-03-31');
+ assert.equal(recurrenceDay('2024-02-29','yearly',1),'2025-02-28');
+ let {state,generated}=planningCommand(f.state,company,{type:'schedule-create',kind:'invoice',name:'Monthly maintenance',party:first.parties[0].id,item:first.items[0].id,job:first.jobs[0].id,quantity:1,unitCents:8700,start:'2026-01-31',frequency:'monthly',end:'2026-05-31',location:'Main'},'2026-03-31');
+ assert.equal(generated,3);assert.equal(state.companies[0].entries.length,0);assert.equal(state.companies[0].docs.length,0);
+ assert.deepEqual(state.companies[0].planning.drafts.map(d=>d.due),['2026-01-31','2026-02-28','2026-03-31']);
+ assert.equal(catchUpPlanning(state,'2026-03-31').state,state);
+ const id=state.companies[0].planning.schedules[0].id;
+ state=planningCommand(state,company,{type:'schedule-active',id,active:false},'2026-04-30').state;
+ assert.equal(catchUpPlanning(state,'2026-04-30').generated,0);
+ ({state,generated}=planningCommand(state,company,{type:'schedule-active',id,active:true},'2026-05-01'));assert.equal(generated,1);
+ const draft=state.companies[0].planning.drafts[0].id;
+ ({state}=planningCommand(state,company,{type:'draft-copy',id:draft,name:'Edited maintenance',quantity:2,unitCents:9000},'2026-05-01'));
+ const c=state.companies[0];assert.equal(c.entries.length,0);assert.equal(c.docs[0].kind,'quote');assert.equal(c.docs[0].total,18000);assert.equal(c.docs[0].label,'Edited maintenance');
+ assert.throws(()=>planningCommand(state,company,{type:'draft-copy',id:draft},'2026-05-01'),/already been resolved/);
+ assert.equal(validateState(state),true);
+ const corrupt=structuredClone(c);corrupt.planning.drafts[1].index=corrupt.planning.drafts[0].index;corrupt.planning.drafts[1].due=corrupt.planning.drafts[0].due;assert.throws(()=>validatePlanning(corrupt),/Duplicate recurrence/);
+});
+test('budget is inclusive, links posted project expense and approved labor, and separates future bills/renewals',()=>{
+ const f=seed(),job=f.first.jobs[0].id;let {state,company}=f;
+ const add=(a,date)=>state=apply(state,company,{...a,date});
+ add({type:'job expense',job,amount:2500},'2026-01-31');
+ add({type:'job expense',job,amount:5000},'2026-02-01');
+ add({type:'time',job,employee:f.first.employees[0].id,minutes:90},'2026-02-04');
+ add({type:'approve time',time:state.companies[0].time[0].id},'2026-02-07');
+ add({type:'time',job,employee:f.first.employees[0].id,minutes:60},'2026-02-05');
+ add({type:'job expense',job,amount:1000},'2026-02-28');
+ const po={party:f.first.parties[1].id,item:f.first.items[0].id,qty:1,unit:6200,location:'Main',job};
+ add({type:'purchase order',...po},'2026-02-06');
+ add({type:'receiving',parent:state.companies[0].docs.at(-1).id},'2026-02-06');
+ add({type:'bill',parent:state.companies[0].docs.at(-1).id},'2026-02-06');
+ add({type:'payment',parent:state.companies[0].docs.at(-1).id,amount:1200},'2026-02-07');
+ ({state}=planningCommand(state,company,{type:'budget-save',name:'February cap',job,from:'2026-02-01',through:'2026-02-28',limit:20000},'2026-02-10'));
+ ({state}=planningCommand(state,company,{type:'schedule-create',kind:'bill',name:'Future service',party:po.party,item:po.item,quantity:1,unitCents:po.unit,start:'2026-03-01',frequency:'monthly'},'2026-02-10'));
+ const c=state.companies[0],out=planningSummary(c,'2026-02-10',[{id:'renewal-id',name:'Lease',date:'2026-03-15'}]);
+ assert.deepEqual([out.budgets[0].postedCosts,out.budgets[0].approvedLabor,out.budgets[0].actual,out.budgets[0].remaining],[12200,4500,16700,3300]);
+ assert.deepEqual(out.recurringBills.map(x=>x.date),['2026-03-01']);
+ assert.equal(out.openBills[0].outstanding,5000);assert.equal(out.openBills[0].estimate,true);assert.equal(out.renewals[0].name,'Lease');
+});

@@ -1,0 +1,9 @@
+# Multi-line quotes, orders and invoices
+
+Open Sales or Purchasing and create a quote or purchase order. Add up to 100 lines, each with one product/service, whole quantity, USD unit price, USD **total discount for the line**, and the relevant stock location. The application subtracts the discount from quantity × unit price. Enter a discount smaller than that subtotal. Print a posted document from its detail view to see the line quantities, discounts, line totals and document total.
+
+Approve the quote as a sales order. For a fulfillment or receiving, enter the quantities handled now; zero skips a line. The order remains open for the remaining quantities. Create a separate invoice or bill from each fulfillment or receipt. Record collections and payments against the specific invoice or bill. Credits similarly show the remaining returnable quantities. A credit reduces the open amount first and records a cash refund for any excess; confirm the return and any refund happened before recording it. Sales returns restore the original carrying cost; the existing purchase return policy uses current carrying cost with a variance when needed.
+
+Partial quantities share the original line discount, with the last portion absorbing rounding differences. Posted originals remain unchanged. Dates must follow the source document and existing stock movement rules. Existing single-line documents retain their previous completion and full-credit behavior. Opening a previous encrypted workspace does not reshape its documents. Back up before upgrading; do not assume a newer backup can be restored into an older program.
+
+This feature remains single-operator, works inside the existing encrypted workspace and requires no external service. It does not add sales-tax automation, currency conversion, card charging, or partial billing of a single receipt or fulfillment.

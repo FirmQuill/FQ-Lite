@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {createLiteServer} from '../serve.mjs';
+test('Lite browser creates discounted two-line quote and two fulfilled invoices',{skip:!process.env.ERP_LITE_BROWSER_EXE},async t=>{
+ const server=createLiteServer();await new Promise((resolve,reject)=>server.once('error',reject).listen(0,'127.0.0.1',resolve));
+ t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const {chromium}=createRequire(import.meta.url)(process.env.ERP_LITE_PLAYWRIGHT||'playwright');const browser=await chromium.launch({executablePath:process.env.ERP_LITE_BROWSER_EXE,headless:true});t.after(()=>browser.close());const p=await browser.newPage({viewport:{width:1400,height:970}}),errors=[];p.on('pageerror',e=>errors.push(e.message));p.setDefaultTimeout(12000);
+ await p.goto('http://127.0.0.1:'+server.address().port);await p.getByRole('button',{name:'I agree to the Terms of Service',exact:true}).click();
+ await p.locator('#gate-form [name=name]').fill('Fictional Lite Commerce');await p.locator('#gate-form [name=password]').fill('Fictional browser commerce 2026!');await p.locator('#gate-form [name=confirm]').fill('Fictional browser commerce 2026!');await p.locator('#gate-form button').click();await p.locator('#company').waitFor();
+ const click=(act,key)=>p.locator(`[data-act="${act}"]${key?`[data-key="${key}"]`:''}`).first().click();
+ const modal=p.locator('dialog[open]');const submit=async()=>{await modal.locator('[type=submit]').click();await modal.waitFor({state:'hidden'});};
+ await click('nav','Directory');await click('contact');await modal.locator('[name=name]').fill('Fictional Buyer');await submit();
+ for(const name of ['Design service','Planning service']){await click('item');await modal.locator('[name=name]').fill(name);await modal.locator('[name=kind]').selectOption('Service');await submit();}
+ await click('nav','Sales');await click('quote');
+ await modal.locator('[name=unit]').fill('50.00');await modal.locator('[name=qty]').fill('3');await modal.locator('[name=discount]').fill('2.00');
+ await modal.getByRole('button',{name:'Add item line'}).click();assert.equal(await modal.locator('.document-line').count(),2);
+ await modal.locator('[name=item]').nth(1).selectOption({label:'Planning service'});await modal.locator('[name=unit]').nth(1).fill('25.00');
+ await modal.locator('[name=label]').fill('Two service lines');await submit();
+ await p.getByText('2 item lines',{exact:true}).waitFor();await p.getByRole('button',{name:'Sales order',exact:true}).click();await submit();
+ await p.getByRole('button',{name:'Fulfillment',exact:true}).click();await modal.locator('[name=pick-L1]').fill('1');await modal.locator('[name=pick-L2]').fill('0');await submit();
+ await p.getByRole('button',{name:'Invoice',exact:true}).click();await submit();
+ const invoice=p.getByRole('row').filter({has:p.getByRole('cell',{name:'Invoice',exact:true})}).first();
+ await invoice.locator('[data-act=detail]').click();assert.match(await modal.locator('.printable').innerText(),/Design service[\s\S]*\$49\.33/);await click('cancel');
+ await p.getByRole('button',{name:'Fulfillment',exact:true}).click();await submit();
+ await p.getByRole('button',{name:'Invoice',exact:true}).click();await submit();
+ await p.getByRole('cell',{name:'$123.67',exact:true}).first().waitFor();assert.equal(await p.getByRole('button',{name:'Fulfillment',exact:true}).count(),0);
+ assert.deepEqual(errors,[]);
+ await p.evaluate(()=>navigator.serviceWorker.ready);await p.context().setOffline(true);await p.reload();await p.locator('#gate-form [name=password]').fill('Fictional browser commerce 2026!');await p.locator('#gate-form button').click();await click('nav','Sales');await p.getByRole('cell',{name:'$123.67',exact:true}).first().waitFor();await p.context().setOffline(false);
+});

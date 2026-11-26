@@ -1,17 +1,21 @@
-import {newVault,apply,validateState,recommended,modules,accounts,manualAccounts,outstanding,sum,cents,dollars,check,statements} from './core.mjs';
+import {catchUpPlanning,planningCommand} from './planning-core.mjs';
+import {renderPlanning,planningAction} from './planning-views.mjs';
+import {emptyManualPayroll,manualPayrollCommand} from './manual-payroll.mjs';
+import {manualPayrollContent,manualPayrollAction} from './manual-payroll-ui.mjs';
+import {newVault,apply,validateState,recommended,modules,accounts,manualAccounts,outstanding,availableDocumentLines,sum,cents,dollars,check,statements} from './core.mjs';
 import {hasVault,createVault,openVault,restoreVault,MAX_BACKUP_BYTES} from './vault.mjs';
 import {sampleVault} from './sample.mjs';
 import {previewBankCsv,exportBankCsv,reconcileBankStatement} from './interop.mjs';
 import {states,ficaPreview,incomeTaxPreview,payrollGate} from './payroll-rules.mjs';
 import {projectsView,legalView,trackedView,deskAction} from './desk-views.mjs';
-import {esc,btn,money,table,panel,pretty,code,choices,input,options,select,dateField,mapping,acts,brand,home,contacts,commerceView,jobs,warehouse,assetsView,accounting,banks,reportView,payrollView,history,ref,title,line} from './views.mjs';
+import {esc,btn,money,table,panel,pretty,code,choices,input,options,select,dateField,mapping,acts,brand,home,contacts,commerceView,jobs,warehouse,assetsView,accounting,banks,reportView,payrollView,history,ref,title,line,documentEditor,handleDocumentLine,parseDocumentLines,documentLineSelection,parseSelectedDocumentLines,commercialLineTable} from './views.mjs';
 
 const app=document.querySelector('#app'),dialog=document.querySelector('dialog'),notice=document.querySelector('#notice');
 let session=null,companyId='',page='Overview',menu=false,existing=false,busy=false,epoch=0,lockTimer,lastActivity=0;
 const timeout=5*60000;
 const localDate=()=>{const now=new Date();return [now.getFullYear(),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0')].join('-');};
 let filter={from:'2000-01-01',through:localDate(),group:''};
-const nav=['Overview','Directory',...modules,'History','Company setup'];
+const nav=['Overview','Directory',...modules,'Planning','History','Company setup'];
 const icons=['⌂','☷','↗','↙','◷','▤','◇','▦','≡','▣','▥','◎','◴','⚙'];
 function toast(s){notice.textContent=s;clearTimeout(toast.timer);toast.timer=setTimeout(()=>notice.textContent='',4100);}
 function showError(err){const out=dialog.open?dialog.querySelector('.error'):app.querySelector('.error');if(out){out.textContent=err.message||String(err);out.scrollIntoView({block:'nearest'});}else toast(err.message);}
@@ -37,14 +41,14 @@ function previewSettings(form){
 function gate(){
   app.innerHTML=`<div class="gate"><div class="gateart">${brand}<section><p class="eyebrow">ERP Lite</p><h2>Company books</h2><div class="bookart" aria-hidden="true"></div></section><p class="foot small">Local vault &nbsp; / &nbsp; US edition</p></div><div class="gatepanel"><p class="eyebrow">FirmQuill &nbsp; / &nbsp; Lite preview</p><h1>${existing?'Unlock your vault':'Create your workspace'}</h1><p class="quiet">${existing?'Enter your password to open the books stored in this browser.':'Keep your company books in an encrypted vault on this device.'}</p><form id="gate-form">${existing?'':input('name','Company name','text','','maxlength="160"')+setupFields()}${input('password','Vault password (12+ characters)','password','','autocomplete="'+(existing?'current-password':'new-password')+'" minlength="12"')}${existing?'':input('confirm','Confirm password','password','','autocomplete="new-password" minlength="12"')}<div class="error" role="alert"></div><button class="primary">${existing?'Unlock vault':'Create encrypted vault'}</button></form><div class="row">${btn('restore','Restore backup','','link')}${existing?'':btn('sample','Use sample companies','','link')}</div><p class="quiet small locknote">Automatic lock after five minutes of inactivity.</p></div></div>`;
 }
-function start(s){session=s;existing=true;companyId=s.state.companies[0].id;lastActivity=Date.now();page='Overview';notice.textContent='';closeModal();touch();render();}
+async function start(s){session=s;existing=true;companyId=s.state.companies[0].id;lastActivity=Date.now();page='Overview';notice.textContent='';closeModal();touch();const token=epoch;try{const next=catchUpPlanning(s.state,localDate());if(next.generated){validateState(next.state);await s.save(next.state);}}catch(err){if(token===epoch&&session===s)toast('Recurring drafts could not refresh: '+err.message);}if(token===epoch&&session===s)render();}
 function setup(c){return panel('Company profile',`<p><b>${esc(c.name)}</b></p><p class="quiet">${acts.filter(([v])=>c.activities.includes(v)).map(([,n])=>n).join(' · ')||'No activities selected'}</p><div class="rule"></div><p>Featured on overview</p><p>${esc(c.featured.join(' · ')||'None')}</p>`,btn('settings','Edit profile'))+
   panel('Workspaces',`<p>Each company keeps its own contacts, stock, document numbers and journals.</p>`,btn('company','Add company'))+
   panel('Vault recovery',`<p>An encrypted backup includes every company and its attachments. Keep your password somewhere recoverable.</p>`,btn('backup','Download backup')+btn('restore','Restore backup'));}
-const view={'Overview':home,'Directory':contacts,'Sales':c=>commerceView(c,true),'Purchasing':c=>commerceView(c,false),'Projects':projectsView,'Contracts & legal':legalView,'Assets & pallets':trackedView,'Jobs & time':jobs,'Warehouse':c=>warehouse(c,false),'Assembly':c=>warehouse(c,true),'Fixed assets':assetsView,'Accounting':accounting,'Banking':banks,'Reports':reportView,'Payroll':payrollView,'History':history,'Company setup':setup};
+const view={'Overview':home,'Directory':contacts,'Sales':c=>commerceView(c,true),'Purchasing':c=>commerceView(c,false),'Projects':projectsView,'Contracts & legal':legalView,'Assets & pallets':trackedView,'Jobs & time':jobs,'Warehouse':c=>warehouse(c,false),'Assembly':c=>warehouse(c,true),'Fixed assets':assetsView,'Accounting':accounting,'Banking':banks,'Reports':reportView,'Payroll':c=>manualPayrollContent({data:c.manualPayroll,employees:c.employees})+payrollView(c),'Planning':c=>renderPlanning(c,localDate()),'History':history,'Company setup':setup};
 function render(){
   if(!session){gate();return;}
-  const s=session.state,c=s.companies.find(x=>x.id===companyId),ord=['Overview','Directory',...c.featured,...modules.filter(m=>!c.featured.includes(m)),'History','Company setup'];
+  const s=session.state,c=s.companies.find(x=>x.id===companyId),ord=['Overview','Directory',...c.featured,...modules.filter(m=>!c.featured.includes(m)),'Planning','History','Company setup'];
   const navButton=m=>`<button type="button" data-act="nav" data-key="${esc(m)}" class="${m===page?'active':''}" ${m===page?'aria-current="page"':''}><span aria-hidden="true" class="navicon">${icons[nav.indexOf(m)]||'◇'}</span>${esc(m)}</button>`;
   app.innerHTML=`<div class="shell${menu?' menu':''}"><aside>${brand}<nav aria-label="Workspace"><p class="navlabel">Workspace</p>${ord.slice(0,2).map(navButton).join('')}${c.featured.length?'<p class="navlabel">Featured</p>':''}${c.featured.map(navButton).join('')}<p class="navlabel">All tools</p>${ord.slice(2+c.featured.length).map(navButton).join('')}</nav><div class="sidebarfoot small">ERP Lite · Local preview</div></aside><div class="maincol"><header class="toolbar"><div class="toolgroup">${btn('menu','Menu','','mobilemenu')}<label for="company">Company</label><select id="company" aria-label="Active company" class="picker">${options(mapping(s.companies))}</select></div><div class="toolgroup"><span class="quiet small" id="offline-status">${offlineStatus}</span>${btn('lock','Lock vault')}</div></header><div class="workspace"><div class="pagehead"><div><p class="eyebrow">${esc(c.name)}</p><h1>${page==='Overview'?'Workspace overview':esc(page)}</h1></div>${page==='Overview'?btn('quote','New quote','','primary'):''}</div><div class="error" role="alert"></div>${view[page](c,s,filter)}</div></div></div>`;
   app.querySelector('#company').value=companyId;if(page==='Reports')app.querySelector('[name="group"]').value=filter.group;
@@ -57,12 +61,18 @@ async function save(type,a){
   if(type==='group')filter.group=next.groups.at(-1).id;
   closeModal();render();toast('Saved to the encrypted vault.');
 }
+async function savePlanning(action){
+  const current=session,token=epoch;check(current,'Unlock the vault first.');
+  const {state,generated}=planningCommand(current.state,companyId,action,localDate());validateState(state);await current.save(state);
+  if(token!==epoch||session!==current)return;closeModal();render();toast(generated?generated+' recurring draft(s) created.':'Saved to the encrypted vault.');
+}
 function formModal(heading,fields,submit,handler){
   closeModal();dialog.innerHTML=`<form><h2>${esc(heading)}</h2><div class="fields">${fields}</div><div class="error" role="alert"></div><div class="dialogfoot">${btn('cancel',submit?'Cancel':'Close')}${submit?`<button class="primary" type="submit">${esc(submit)}</button>`:''}</div></form>`;
   dialog.showModal();dialog.onsubmit=async ev=>{
     ev.preventDefault();if(busy||!handler)return;busy=true;const token=epoch,form=ev.target,submitter=ev.submitter;if(submitter)submitter.disabled=true;
     const f=new FormData(form);try{await handler(Object.fromEntries(f),f,form);}catch(err){if(epoch===token)showError(err);}finally{if(epoch===token){busy=false;if(submitter)submitter.disabled=false;}}
   };
+  dialog.onclick=ev=>handleDocumentLine(ev,dialog);
   dialog.onchange=ev=>previewSettings(ev.target.form||dialog.querySelector('form'));
 }
 function download(contents,filename,mime){
@@ -72,7 +82,7 @@ function download(contents,filename,mime){
 function docFields(c,sale){
   const people=c.parties.filter(p=>p.kind===(sale?'Customer':'Vendor'));
   check(people.length&&c.items.length,'Add the contact and an item or service in Directory first.');
-  return select('party',sale?'Customer':'Vendor',mapping(people))+select('item','Item or service',mapping(c.items))+input('qty','Quantity','number',1,'min="1" step="1"')+input('unit','Unit price (USD)','text','','inputmode="decimal"')+input('location','Location','text','Main')+
+  return select('party',sale?'Customer':'Vendor',mapping(people))+documentEditor(c)+
    `<label>Job<select name="job">${options([['','No job'],...mapping(c.jobs)])}</select></label>`;
 }
 function action(type,key){
@@ -82,10 +92,10 @@ function action(type,key){
     const fields=input('file','Encrypted backup','file','','accept=".json,.firmquill,.fieldledger"')+input('password','Backup password','password','','autocomplete="off"')+
       (current?'<label class="checkfield"><input type="checkbox" required>Replace every company in this vault. I have saved a current backup.</label>':'');
     if(existing&&!current)throw Error('Unlock the existing vault before replacing its contents.');
-    formModal('Restore encrypted backup',fields,'Restore vault',async v=>{check(v.file.size<=MAX_BACKUP_BYTES,'Backup exceeds the size limit.');const data=await v.file.text();if(token!==epoch)return;const restored=await restoreVault(data,v.password,validateState,current||undefined);if(token!==epoch){restored.lock();return;}current?.lock();start(restored);toast('Backup restored.');});return;
+    formModal('Restore encrypted backup',fields,'Restore vault',async v=>{check(v.file.size<=MAX_BACKUP_BYTES,'Backup exceeds the size limit.');const data=await v.file.text();if(token!==epoch)return;const restored=await restoreVault(data,v.password,validateState,current||undefined);if(token!==epoch){restored.lock();return;}current?.lock();await start(restored);toast('Backup restored.');});return;
   }
   if(type==='sample'){
-    formModal('Create a sample vault',`<p class="quiet">Explore Northline Studio and Alder Supply with synthetic transactions. Choose a password to keep your edits.</p>`+input('password','New password (12+ characters)','password','','minlength="12" autocomplete="new-password"')+input('confirm','Confirm password','password','','autocomplete="new-password"'),'Create sample vault',async v=>{check(v.password===v.confirm,'Passwords differ.');start(await createVault(v.password,sampleVault(),validateState));});return;
+    formModal('Create a sample vault',`<p class="quiet">Explore Northline Studio and Alder Supply with synthetic transactions. Choose a password to keep your edits.</p>`+input('password','New password (12+ characters)','password','','minlength="12" autocomplete="new-password"')+input('confirm','Confirm password','password','','autocomplete="new-password"'),'Create sample vault',async v=>{check(v.password===v.confirm,'Passwords differ.');await start(await createVault(v.password,sampleVault(),validateState));});return;
   }
   if(!session)return;
   const s=session.state,c=s.companies.find(x=>x.id===companyId),now=localDate();
@@ -98,7 +108,15 @@ function action(type,key){
   const memo=input('label','Description','text','','maxlength="160"'),dates=dateField(now);
   const list=(name,label,rows)=>{check(rows.length,'Create a '+label.toLowerCase()+' record first.');return select(name,label,mapping(rows));};
   const products=c.items.filter(i=>i.kind==='Product');
-  if(deskAction(type,key,c,now,formModal,save))return;
+  if(planningAction(type,key,c,now,formModal,savePlanning)||deskAction(type,key,c,now,formModal,save))return;
+  if(page==='Payroll'&&manualPayrollAction(type,key,{result:{data:c.manualPayroll??emptyManualPayroll(),employees:c.employees},now,formModal,download,command:async payload=>{
+    const current=session,token=epoch;
+    const next=structuredClone(current.state),company=next.companies.find(x=>x.id===c.id);
+    const out=manualPayrollCommand(company.manualPayroll,company,payload);
+    company.manualPayroll=out.data;validateState(next);await current.save(next);
+    if(token===epoch&&current===session){closeModal();render();toast(out.run?'Manual pay run finalized.':'Manual payroll saved to the vault.');}
+    return out;
+  }}))return;
   switch(type){
     case 'company':form('Create company',input('name','Company name')+setupFields(),(v,f)=>({...v,activities:f.getAll('activities')}));break;
     case 'settings':form('Company setup',input('name','Company name','text',c.name)+`<fieldset><legend>Company activities</legend>${choices('activities',acts,c.activities)}</fieldset><div class="callout small">Recommended home & navigation<p id="suggested">${esc(recommended(c.activities).join(' · '))}</p></div><fieldset><legend>Feature these workflows</legend>${choices('featured',modules.map(m=>[m,m]),c.featured)}</fieldset>`,(v,f)=>({...v,activities:f.getAll('activities'),featured:f.getAll('featured')}));break;
@@ -108,12 +126,12 @@ function action(type,key){
     case 'time':form('Log time',list('employee','Employee',c.employees)+list('job','Job',c.jobs)+dates+count('minutes','Minutes worked',60),v=>({...v,minutes:Number(v.minutes)}));break;
     case 'approve time':form('Approve time entry',dates,v=>({...v,time:key}),'Approve');break;
     case 'job expense':form('Record cash job expense',list('job','Job',c.jobs)+memo+amount()+dates,v=>({...v,amount:cents(v.amount)}));break;
-    case 'quote':case 'purchase order':form('New '+type,docFields(c,type==='quote')+memo+dates,v=>({...v,qty:Number(v.qty),unit:cents(v.unit)}));break;
+    case 'quote':case 'purchase order':form('New '+type,docFields(c,type==='quote')+memo+dates,(v,f)=>({party:v.party,job:v.job,label:v.label,date:v.date,lines:parseDocumentLines(f)}));break;
     case 'advance':{
       const [parent,step]=key.split('|'),p=c.docs.find(d=>d.id===parent),settles=['collection','payment'].includes(step);
       const info=`<p class="quiet">${esc(code(p))} · ${esc(title(c.parties,p.party))} · ${money(p.total)}</p>`;
-      const credit=step.includes('credit')?'<p class="callout warn">This fully credits the document, returns product stock and records a cash refund for any settled amount. Confirm that the return and refund have occurred.</p>':'';
-      formModal(pretty(step),info+credit+dates+(settles?amount('amount','Settlement amount (USD)',(BigInt(outstanding(c,p))/100n)+'.'+String(outstanding(c,p)%100).padStart(2,'0')):''),'Record '+step,v=>save(step,{...v,label:pretty(step)+' · '+code(p),parent,...(settles?{amount:cents(v.amount)}:{})}));break;
+      const credit=step.includes('credit')?'<p class="callout warn">Credits reduce the open balance first and record a cash refund for any excess; selected products return to or leave stock. Record only completed returns and refunds.</p>':'';
+      formModal(pretty(step),info+credit+dates+documentLineSelection(c,p,step,availableDocumentLines(c,p,step))+(settles?amount('amount','Settlement amount (USD)',(BigInt(outstanding(c,p))/100n)+'.'+String(outstanding(c,p)%100).padStart(2,'0')):''),'Record '+step,(v,f)=>save(step,{date:v.date,label:pretty(step)+' · '+code(p),parent,...(settles?{amount:cents(v.amount)}:parseSelectedDocumentLines(f))}));break;
     }
     case 'transfer':case 'adjust':{
       const adjustment=type==='adjust';const fields=(adjustment?select('direction','Direction',[['adjust in','Increase'],['adjust out','Decrease']]):'')+list('item','Stock item',products)+input('location','Source location','text','Main')+(adjustment?amount('amount','Total value for increase (USD)','0.00'):input('to','Destination location'))+count('qty','Units')+memo+dates;
@@ -160,7 +178,7 @@ function action(type,key){
 function detail(c,id){
   const e=ref(c,id),d=c.docs.find(x=>x.id===id),j=c.entries.filter(j=>j.source===id),files=c.attachments.filter(a=>a.source===id);
   const evidence=d?`<section class="printable"><div class="printbrand"><img src="./mark.svg" alt="">FirmQuill</div><p><b>${esc(c.name)}</b></p><p>${esc(d.date)} · ${esc(title(c.parties,d.party))}</p>`+
-    (['payment','collection'].includes(d.kind)?line('Amount settled',d.total):table(['Item or service','Units','Unit price','Document total'],[[esc(title(c.items,d.item)),d.qty,money(d.unit),money(d.total)]]))+'</section>'+
+    (['payment','collection'].includes(d.kind)?line('Amount settled',d.total):commercialLineTable(c,d))+'</section>'+
     btn('print document','Print document')+
     (d.parent?btn('detail','View source '+code(ref(c,d.parent)),d.parent):''):'';
   formModal(code(e)+' · '+pretty(e.kind),`<p>${esc(e.date)} · ${esc(e.label)}</p><p class="small quiet source">${esc(e.id)}</p>${evidence}`+
@@ -207,7 +225,7 @@ app.addEventListener('submit',async ev=>{
   ev.preventDefault();if(busy)return;const form=ev.target,f=new FormData(form),v=Object.fromEntries(f);busy=true;const b=ev.submitter;if(b)b.disabled=true;
   try{if(form.id==='gate-form'){
     if(!existing)check(v.password===v.confirm,'Passwords differ.');
-    start(existing?await openVault(v.password,validateState):await createVault(v.password,newVault(v.name,f.getAll('activities')),validateState));
+    await start(existing?await openVault(v.password,validateState):await createVault(v.password,newVault(v.name,f.getAll('activities')),validateState));
   }else if(form.id==='report-filter'){
     statements([],v.from,v.through);filter={from:v.from,through:v.through,group:v.group};render();
   }}catch(err){showError(err);}finally{busy=false;if(b)b.disabled=false;}
