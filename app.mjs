@@ -3,6 +3,7 @@ import {hasVault,createVault,openVault,restoreVault,MAX_BACKUP_BYTES} from './va
 import {sampleVault} from './sample.mjs';
 import {previewBankCsv,exportBankCsv,reconcileBankStatement} from './interop.mjs';
 import {states,ficaPreview,incomeTaxPreview,payrollGate} from './payroll-rules.mjs';
+import {projectsView,legalView,trackedView,deskAction} from './desk-views.mjs';
 import {esc,btn,money,table,panel,pretty,code,choices,input,options,select,dateField,mapping,acts,brand,home,contacts,commerceView,jobs,warehouse,assetsView,accounting,banks,reportView,payrollView,history,ref,title,line} from './views.mjs';
 
 const app=document.querySelector('#app'),dialog=document.querySelector('dialog'),notice=document.querySelector('#notice');
@@ -40,11 +41,11 @@ function start(s){session=s;existing=true;companyId=s.state.companies[0].id;last
 function setup(c){return panel('Company profile',`<p><b>${esc(c.name)}</b></p><p class="quiet">${acts.filter(([v])=>c.activities.includes(v)).map(([,n])=>n).join(' · ')||'No activities selected'}</p><div class="rule"></div><p>Featured on overview</p><p>${esc(c.featured.join(' · ')||'None')}</p>`,btn('settings','Edit profile'))+
   panel('Workspaces',`<p>Each company keeps its own contacts, stock, document numbers and journals.</p>`,btn('company','Add company'))+
   panel('Vault recovery',`<p>An encrypted backup includes every company and its attachments. Keep your password somewhere recoverable.</p>`,btn('backup','Download backup')+btn('restore','Restore backup'));}
-const view={'Overview':home,'Directory':contacts,'Sales':c=>commerceView(c,true),'Purchasing':c=>commerceView(c,false),'Jobs & time':jobs,'Warehouse':c=>warehouse(c,false),'Assembly':c=>warehouse(c,true),'Fixed assets':assetsView,'Accounting':accounting,'Banking':banks,'Reports':reportView,'Payroll':payrollView,'History':history,'Company setup':setup};
+const view={'Overview':home,'Directory':contacts,'Sales':c=>commerceView(c,true),'Purchasing':c=>commerceView(c,false),'Projects':projectsView,'Contracts & legal':legalView,'Assets & pallets':trackedView,'Jobs & time':jobs,'Warehouse':c=>warehouse(c,false),'Assembly':c=>warehouse(c,true),'Fixed assets':assetsView,'Accounting':accounting,'Banking':banks,'Reports':reportView,'Payroll':payrollView,'History':history,'Company setup':setup};
 function render(){
   if(!session){gate();return;}
   const s=session.state,c=s.companies.find(x=>x.id===companyId),ord=['Overview','Directory',...c.featured,...modules.filter(m=>!c.featured.includes(m)),'History','Company setup'];
-  const navButton=m=>`<button type="button" data-act="nav" data-key="${esc(m)}" class="${m===page?'active':''}" ${m===page?'aria-current="page"':''}><span aria-hidden="true" class="navicon">${icons[nav.indexOf(m)]}</span>${esc(m)}</button>`;
+  const navButton=m=>`<button type="button" data-act="nav" data-key="${esc(m)}" class="${m===page?'active':''}" ${m===page?'aria-current="page"':''}><span aria-hidden="true" class="navicon">${icons[nav.indexOf(m)]||'◇'}</span>${esc(m)}</button>`;
   app.innerHTML=`<div class="shell${menu?' menu':''}"><aside>${brand}<nav aria-label="Workspace"><p class="navlabel">Workspace</p>${ord.slice(0,2).map(navButton).join('')}${c.featured.length?'<p class="navlabel">Featured</p>':''}${c.featured.map(navButton).join('')}<p class="navlabel">All tools</p>${ord.slice(2+c.featured.length).map(navButton).join('')}</nav><div class="sidebarfoot small">ERP Lite · Local preview</div></aside><div class="maincol"><header class="toolbar"><div class="toolgroup">${btn('menu','Menu','','mobilemenu')}<label for="company">Company</label><select id="company" aria-label="Active company" class="picker">${options(mapping(s.companies))}</select></div><div class="toolgroup"><span class="quiet small" id="offline-status">${offlineStatus}</span>${btn('lock','Lock vault')}</div></header><div class="workspace"><div class="pagehead"><div><p class="eyebrow">${esc(c.name)}</p><h1>${page==='Overview'?'Workspace overview':esc(page)}</h1></div>${page==='Overview'?btn('quote','New quote','','primary'):''}</div><div class="error" role="alert"></div>${view[page](c,s,filter)}</div></div></div>`;
   app.querySelector('#company').value=companyId;if(page==='Reports')app.querySelector('[name="group"]').value=filter.group;
 }
@@ -97,6 +98,7 @@ function action(type,key){
   const memo=input('label','Description','text','','maxlength="160"'),dates=dateField(now);
   const list=(name,label,rows)=>{check(rows.length,'Create a '+label.toLowerCase()+' record first.');return select(name,label,mapping(rows));};
   const products=c.items.filter(i=>i.kind==='Product');
+  if(deskAction(type,key,c,now,formModal,save))return;
   switch(type){
     case 'company':form('Create company',input('name','Company name')+setupFields(),(v,f)=>({...v,activities:f.getAll('activities')}));break;
     case 'settings':form('Company setup',input('name','Company name','text',c.name)+`<fieldset><legend>Company activities</legend>${choices('activities',acts,c.activities)}</fieldset><div class="callout small">Recommended home & navigation<p id="suggested">${esc(recommended(c.activities).join(' · '))}</p></div><fieldset><legend>Feature these workflows</legend>${choices('featured',modules.map(m=>[m,m]),c.featured)}</fieldset>`,(v,f)=>({...v,activities:f.getAll('activities'),featured:f.getAll('featured')}));break;

@@ -1,7 +1,8 @@
 // ERP Lite portable format v1. Currency is USD; journal amounts are signed cents (debit positive).
-export const VERSION = '0.1.0-preview.2';
+import {deskTypes,applyDesk,validateDesk} from './desk-core.mjs';
+export const VERSION = '0.4.0-preview.1';
 export const activities = ['products','jobs','time','stock','employees'];
-export const modules = ['Sales','Purchasing','Jobs & time','Warehouse','Assembly','Fixed assets','Accounting','Banking','Reports','Payroll'];
+export const modules = ['Sales','Purchasing','Projects','Contracts & legal','Jobs & time','Assets & pallets','Warehouse','Assembly','Fixed assets','Accounting','Banking','Reports','Payroll'];
 export const accounts = {
   '1000':['Operating cash','Asset'], '1100':['Accounts receivable','Asset'], '1200':['Inventory','Asset'],
   '1500':['Equipment at cost','Asset'], '1590':['Accumulated depreciation','Asset'],
@@ -116,6 +117,7 @@ const commerceKinds=['quote','sales order','fulfillment','invoice','collection',
 const manualAccounts=['1000','3000','4000','5000','5100','5200'];
 export {manualAccounts};
 export function apply(state,company,action){
+  if(deskTypes.has(action?.type))return applyDesk(state,company,action,apply);
   const s=structuredClone(state), c=byId(s.companies,company), a=action;
   const e=event(c,a.type,a.date,a.label||a.name||a.type);
   if(a.requestId){name(a.requestId);check(!c.history.some(x=>x.requestId===a.requestId),'Duplicate operation.');e.requestId=a.requestId;}
@@ -272,6 +274,7 @@ export function validateState(s){
     for(const r of c.bank){date(r.date);integer(r.amountCents);if(r.match)byId(c.entries,r.match);}
     for(const r of c.reconciliations){date(r.date);integer(r.opening);integer(r.closing);r.rows.forEach(k=>byId(c.bank,k));}
     for(const a of c.attachments)byId(c.history,a.source);
+    validateDesk(c);
     check(balance(c,'1200')===sum(c.moves.map(x=>x.value)),'Stock value differs from ledger.');
     check(balance(c,'1100')===sum(c.docs.filter(d=>d.kind==='invoice').map(d=>outstanding(c,d)))&&-balance(c,'2000')===sum(c.docs.filter(d=>d.kind==='bill').map(d=>outstanding(c,d))),'Open documents differ from ledger.');
   }

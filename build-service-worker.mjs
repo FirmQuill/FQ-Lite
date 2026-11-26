@@ -4,7 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 const root=path.dirname(fileURLToPath(import.meta.url));
-const files=["terms.mjs","terms-ui.mjs","terms-entry.mjs","terms.css","index.html","mark.svg","headquarters.png","app.css","app.mjs","core.mjs","views.mjs","sample.mjs","vault.mjs","interop.mjs","payroll-rules.mjs","terms.json","privacy.html","privacy.css","consent.mjs","LICENSE","THIRD-PARTY-NOTICES.md"];
+const files=["terms.mjs","terms-ui.mjs","terms-entry.mjs","terms.css","index.html","mark.svg","headquarters.png","app.css","app.mjs","core.mjs","desk-core.mjs","desk-views.mjs","views.mjs","sample.mjs","vault.mjs","interop.mjs","payroll-rules.mjs","terms.json","privacy.html","privacy.css","consent.mjs","LICENSE","THIRD-PARTY-NOTICES.md"];
 const digest=b=>createHash('sha256').update(b).digest('hex');
 const hashes=Object.fromEntries(files.map(file=>{let bytes=fs.readFileSync(path.join(root,file));return [file,digest(bytes)];}));
 const version=digest(JSON.stringify(hashes)).slice(0,20);

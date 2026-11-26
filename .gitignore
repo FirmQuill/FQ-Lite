@@ -1,0 +1,16 @@
+# Keep owner data and private deliverables outside the application checkout.
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.fqdb
+*.fqsetup.json
+*.firmquill
+.env
+.env.*
+raw-exports/
+customer-packages/
+private-manual/
+private-kb/
+FirmQuill-Customer-Manual/
+node_modules/
