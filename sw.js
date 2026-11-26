@@ -1,6 +1,6 @@
 const scope=self.registration.scope;
 const prefix='fieldledger-lite:'+encodeURIComponent(new URL(scope).pathname)+':';
-const cacheName=prefix+'a54482b1ec0fdbc9bd90';
+const cacheName=prefix+'df388a31957b3a3bae3e';
 const shell=["terms.mjs","terms-ui.mjs","terms-entry.mjs","terms.css","index.html","mark.svg","headquarters.png","app.css","app.mjs","core.mjs","desk-core.mjs","desk-views.mjs","views.mjs","sample.mjs","vault.mjs","interop.mjs","payroll-rules.mjs","terms.json","privacy.html","privacy.css","consent.mjs","LICENSE","THIRD-PARTY-NOTICES.md"];
 const urls=shell.map(name=>new URL(name,scope).href);
 self.addEventListener('install',event=>event.waitUntil((async()=>{
