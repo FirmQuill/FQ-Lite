@@ -9,7 +9,27 @@ const runId=value=>{fail(typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,1
 const safeId=value=>{fail(typeof value==='string'&&value.length>0&&value.length<=160,'Choose a valid record.');return value;};
 export const emptyManualPayroll=()=>({schema:1,revision:0,rules:[],opening:[],drafts:[],runs:[]});
 const ppm=value=>{fail(Number.isInteger(value)&&value>=0&&value<=1_000_000,'Enter a rate between 0% and 100%.');return value;};
-const ratio=(n,d)=>cents(Number((n+d/2n)/d));
+const ratio=(n,d,mode)=>cents(Number(mode==='down'?n/d:mode==='up'?(n+d-1n)/d:(n+d/2n)/d));
+const methodKeys=['jurisdiction','wageBasis','pretaxTreatment','rounding','periodPolicy'];
+const ruleDefaults={jurisdiction:null,wageBasis:'all',pretaxTreatment:'ignore',rounding:'nearest',periodPolicy:'every'};
+export const manualRulePolicy=rule=>({...ruleDefaults,...Object.fromEntries(methodKeys.filter(k=>Object.hasOwn(rule,k)).map(k=>[k,rule[k]]))});
+const periodKeys=['periodKind','pretaxRegular','pretaxOther'];
+const optionalRun=a=>periodKeys.some(k=>Object.hasOwn(a,k));
+function periodInput(a,regular,other){
+  const periodKind=a.periodKind??'full',pretaxRegular=cents(a.pretaxRegular??0),pretaxOther=cents(a.pretaxOther??0);
+  fail(['full','partial'].includes(periodKind),'Choose a full or partial pay period.');
+  fail(pretaxRegular<=regular&&pretaxOther<=other,'Entered pre-tax deductions exceed the earnings bucket.');
+  return {periodKind,pretaxRegular,pretaxOther};
+}
+function ruleBasis(rule,input,priorWages){
+  const {wageBasis,pretaxTreatment,periodPolicy}=manualRulePolicy(rule);
+  const affected=input.periodKind==='partial'&&periodPolicy==='full-only';
+  const regular=input.regular-(pretaxTreatment==='subtract'?(input.pretaxRegular??0):0);
+  const other=input.other-(pretaxTreatment==='subtract'?(input.pretaxOther??0):0);
+  const eligibleBasis=affected?0:wageBasis==='regular'?regular:wageBasis==='other'?other:add(regular,other);
+  const basis=Math.min(eligibleBasis,rule.periodCap??eligibleBasis,rule.annualCap==null?eligibleBasis:Math.max(0,rule.annualCap-priorWages));
+  return {eligibleBasis,basis,skippedForPartial:affected};
+}
 export function parsePayrollAmount(value,field='Amount'){
   const m=/^(\d{1,11})(?:\.(\d{1,2}))?$/.exec(String(value??'').trim());fail(m,field+' must be a dollar amount with up to two decimals.');return cents(Number(m[1])*100+Number((m[2]||'').padEnd(2,'0')));
 }
@@ -25,6 +45,14 @@ const ruleInput=a=>{
   const locality=a.locality==null||a.locality===''?null:labels(a.locality);
   fail(!workState||/^[A-Z]{2}$/.test(workState),'Use a two-letter work state.');
   const rule={key,name,effective,through,workState,locality,side:a.side,method:a.method,periodCap:a.periodCap==null?null:cents(a.periodCap),annualCap:a.annualCap==null?null:cents(a.annualCap)};
+  if(Object.hasOwn(a,'calculationVersion')||methodKeys.some(k=>Object.hasOwn(a,k))){
+    fail(a.calculationVersion===undefined||a.calculationVersion===2,'Unknown payroll rule calculation version.');
+    const m=manualRulePolicy(a);
+    if(m.jurisdiction!==null)m.jurisdiction=labels(m.jurisdiction);
+    fail(['all','regular','other'].includes(m.wageBasis)&&['ignore','subtract'].includes(m.pretaxTreatment)&&
+      ['nearest','down','up'].includes(m.rounding)&&['every','full-only'].includes(m.periodPolicy),'Choose a supported basis, deduction treatment, rounding and pay period policy.');
+    Object.assign(rule,{calculationVersion:2,...m});
+  }
   if(a.method==='percentage')rule.rate=ppm(a.rate);
   if(a.method==='flat')rule.amount=cents(a.amount);
   if(a.method==='brackets'){
@@ -43,7 +71,7 @@ function runInput(a,company) {
   const exclude=a.exclude??[];
   fail(Array.isArray(exclude)&&exclude.length<=24,'Invalid rule selection.');
   const omitted=exclude.map(code);fail(new Set(omitted).size===omitted.length,'A rule was excluded twice.');
-  return {employee,start,end,payDate,regular,other,exclude:omitted};
+  return {employee,start,end,payDate,regular,other,exclude:omitted,...(optionalRun(a)?periodInput(a,regular,other):{})};
 }
 function relevant(data,key,payDate){
   return data.rules.filter(r=>r.key===key&&r.effective<=payDate).sort((a,b)=>b.effective.localeCompare(a.effective))[0];
@@ -51,13 +79,13 @@ function relevant(data,key,payDate){
 function rateAmount(rule,base){
   if(!base)return 0;
   if(rule.method==='flat')return rule.amount;
-  if(rule.method==='percentage')return ratio(BigInt(base)*BigInt(rule.rate),1_000_000n);
+  if(rule.method==='percentage')return ratio(BigInt(base)*BigInt(rule.rate),1_000_000n,rule.rounding);
   let total=0n;
   for(const [i,band] of rule.brackets.entries()){
     const amount=Math.max(0,Math.min(base,rule.brackets[i+1]?.start??base)-band.start);
     total+=BigInt(amount)*BigInt(band.rate);
   }
-  return ratio(total,1_000_000n);
+  return ratio(total,1_000_000n,rule.rounding);
 }
 export function activeManualRules(data,payDate){
   date(payDate);
@@ -70,18 +98,22 @@ export function calculateManualPayroll(data,company,input){
   const worker=employeeFor(company,a.employee);
   const active=activeManualRules(data,a.payDate).filter(r=>(!r.workState||r.workState===worker.state)&&(!r.locality||r.locality.toLowerCase()===worker.locality?.trim().toLowerCase()));
   fail(a.exclude.every(k=>data.rules.some(r=>r.key===k)),'An excluded rule is not defined; review the draft.');
-  const ruleLines=active.filter(r=>!a.exclude.includes(r.key)).map(rule=>{
+  const included=active.filter(r=>!a.exclude.includes(r.key));
+  const versioned=optionalRun(a)||included.some(r=>r.calculationVersion===2);
+  const period=periodInput(a,a.regular,a.other),pretaxTotal=add(period.pretaxRegular,period.pretaxOther);
+  const ruleLines=included.map(rule=>{
     const opening=data.opening.find(r=>r.employee===a.employee&&r.key===rule.key&&r.year===year)?.wages??0;
     const priorWages=prior.filter(r=>r.payDate.slice(0,4)===year).reduce((sum,r)=>add(sum,r.ruleLines.find(x=>x.rule.key===rule.key)?.basis??0),opening);
-    const basis=Math.min(gross,rule.periodCap??gross,rule.annualCap==null?gross:Math.max(0,rule.annualCap-priorWages));
-    return {rule,priorWages,basis,amount:rateAmount(rule,basis)};
+    const {basis,eligibleBasis,skippedForPartial}=ruleBasis(rule,{...a,...period},priorWages);
+    return {rule,priorWages,basis,amount:rateAmount(rule,basis),...(versioned?{eligibleBasis,skippedForPartial}:{})};
   });
   const employeeTax=ruleLines.filter(l=>l.rule.side==='employee').reduce((s,l)=>add(s,l.amount),0);
   const employerTax=ruleLines.filter(l=>l.rule.side==='employer').reduce((s,l)=>add(s,l.amount),0);
-  fail(employeeTax<=gross,'Employee withholdings exceed gross wages. Review your rules.');
+  fail(employeeTax<=gross-pretaxTotal,'Employee withholdings exceed wages after entered deductions. Review your rules.');
   const priorYear=prior.filter(r=>r.payDate.slice(0,4)===year),priorNet=priorYear.reduce((total,r)=>add(total,r.net),0),priorGross=priorYear.reduce((total,r)=>add(total,r.gross),0);
   const excludedRules=active.filter(r=>a.exclude.includes(r.key)).map(r=>({key:r.key,name:r.name}));
-  return {...a,employeeName:employeeFor(company,a.employee).name,companyName:company.name,gross,employeeTax,employerTax,net:gross-employeeTax,cost:add(gross,employerTax),priorNet,priorGross,ruleLines,excludedRules,mode:'manual'};
+  return {...a,employeeName:employeeFor(company,a.employee).name,companyName:company.name,gross,employeeTax,employerTax,net:gross-employeeTax-pretaxTotal,cost:add(gross,employerTax),priorNet,priorGross,ruleLines,excludedRules,mode:'manual',
+    ...(versioned?{calculationVersion:2,...period,pretaxTotal}:{})};
 }
 export function manualPayrollCommand(data,company,a,actor='local owner',stamp=new Date().toISOString()){
   fail(a&&typeof a==='object','Choose a manual payroll action.');
@@ -111,7 +143,7 @@ export function manualPayrollCommand(data,company,a,actor='local owner',stamp=ne
     // Save the exact preview. A material change requires explicit recalculation and review.
     const {employee,start,end,payDate,regular,other,exclude}=result;
     const previous=next.drafts.find(d=>d.id===id);
-    const draft={id,input:{employee,start,end,payDate,regular,other,exclude},preview:result,savedAt:stamp,savedBy:actor,...(a.timeSource?{timeSource:a.timeSource}:{})};
+    const draft={id,input:{employee,start,end,payDate,regular,other,exclude,...(optionalRun(a)?periodInput(a,regular,other):{})},preview:result,savedAt:stamp,savedBy:actor,...(a.timeSource?{timeSource:a.timeSource}:{})};
     if(previous)next.drafts=next.drafts.map(d=>d.id===id?draft:d);else next.drafts.push(draft);
   }else if(a.type==='finalize'){
     const draft=next.drafts.find(d=>d.id===a.id);fail(draft,'Payroll draft not found.',404);
@@ -135,32 +167,52 @@ export function validateManualPayroll(data,company){
   const tuple=(...keys)=>row=>JSON.stringify(keys.map(k=>row[k]));
   unique(data.rules,tuple('key','effective'));unique(data.opening,tuple('employee','year','key'));unique([...data.drafts,...data.runs],r=>r.id);
   fail(data.rules.length<=240&&new Set(data.rules.map(r=>r.key)).size<=24,'Invalid manual rule count.');
-  for(const r of data.rules)ruleInput(r);
+  for(const r of data.rules)validateStoredRule(r);
   for(const r of data.opening){employeeFor(company,r.employee);cents(r.wages);code(r.key);fail(/^\d{4}$/.test(r.year)&&data.rules.some(v=>v.key===r.key),'Invalid payroll opening balance.');}
   for(const r of data.drafts){runId(r.id);runInput(r.input,company);checkResult(r.preview);}
   for(const r of data.runs){runId(r.id);runInput(r,company);checkResult(r);fail(typeof r.finalizedAt==='string'&&r.finalizedAt.length<=40&&typeof r.finalizedBy==='string'&&r.finalizedBy.length<=160,'Invalid finalized payroll snapshot.');}
   return true;
 }
+function validateStoredRule(rule){
+  const validated=ruleInput(rule);
+  fail(!validated.calculationVersion||rule.calculationVersion===2&&methodKeys.every(k=>Object.hasOwn(rule,k)&&rule[k]===validated[k]),
+    'Versioned rule settings are incomplete.');
+  return validated;
+}
 function checkResult(r){
   fail(r?.mode==='manual'&&Array.isArray(r.ruleLines)&&r.ruleLines.length<=24&&Array.isArray(r.excludedRules)&&r.excludedRules.length<=24,'Invalid manual tax result.');
   fail([r.employeeName,r.companyName].every(v=>typeof v==='string'&&v.trim().length>0&&v.length<=160),'Invalid payroll statement names.');
   for(const v of [r.gross,r.regular,r.other,r.employeeTax,r.employerTax,r.net,r.cost,r.priorNet,r.priorGross])cents(v);
-  for(const l of r.ruleLines){ruleInput(l.rule);cents(l.priorWages);cents(l.basis);cents(l.amount);fail(l.basis<=r.gross&&rateAmount(l.rule,l.basis)===l.amount,'Tax line does not reconcile.');}
+  const versioned=r.calculationVersion===2;
+  const treatment=versioned?periodInput(r,r.regular,r.other):{pretaxRegular:0,pretaxOther:0};
+  const pretaxTotal=add(treatment.pretaxRegular,treatment.pretaxOther);
+  fail(versioned?periodKeys.every(k=>Object.hasOwn(r,k))&&r.pretaxTotal===pretaxTotal:r.calculationVersion===undefined&&!optionalRun(r)&&r.pretaxTotal===undefined,
+    'Invalid payroll calculation snapshot version or deductions.');
+  for(const l of r.ruleLines){
+    const normalized=validateStoredRule(l.rule);cents(l.priorWages);cents(l.basis);cents(l.amount);
+    if(versioned){
+      const b=ruleBasis(normalized,{...r,...treatment},l.priorWages);
+      fail(b.basis===l.basis&&b.eligibleBasis===l.eligibleBasis&&b.skippedForPartial===l.skippedForPartial,'Payroll basis or period snapshot does not reconcile.');
+    }else fail(!normalized.calculationVersion&&!Object.hasOwn(l,'eligibleBasis')&&!Object.hasOwn(l,'skippedForPartial'),'Unexpected rule snapshot version.');
+    fail(l.basis<=r.gross&&rateAmount(normalized,l.basis)===l.amount,'Tax line does not reconcile.');
+  }
   for(const rule of r.excludedRules){code(rule.key);labels(rule.name);}
-  fail(r.gross===r.regular+r.other&&r.net===r.gross-r.employeeTax&&r.cost===r.gross+r.employerTax&&r.employeeTax===r.ruleLines.filter(l=>l.rule.side==='employee').reduce((n,l)=>n+l.amount,0)&&r.employerTax===r.ruleLines.filter(l=>l.rule.side==='employer').reduce((n,l)=>n+l.amount,0),'Manual payroll snapshot does not reconcile.');
+  fail(r.gross===r.regular+r.other&&r.net===r.gross-r.employeeTax-pretaxTotal&&r.cost===r.gross+r.employerTax&&r.employeeTax===r.ruleLines.filter(l=>l.rule.side==='employee').reduce((n,l)=>n+l.amount,0)&&r.employerTax===r.ruleLines.filter(l=>l.rule.side==='employer').reduce((n,l)=>n+l.amount,0),'Manual payroll snapshot does not reconcile.');
 }
 export const payrollDollars=n=>[Math.trunc(n/100),String(n%100).padStart(2,'0')].join('.');
 const quote=v=>'"'+String(v??'').replace(/^(?:[\t\r\n]|\s*[=+@-])/,"'$&").replaceAll('"','""')+'"';
 export function payrollRegisterCsv(runs){
- const header=['run_id','mode','employee_id','employee','period_start','period_end','pay_date','regular_usd','other_usd','gross_usd','employee_tax_usd','employer_tax_usd','net_usd','employer_cost_usd','rule_breakdown','excluded_rules'];
- return header.join(',')+'\r\n'+runs.map(r=>[r.id,r.mode,r.employee,r.employeeName,r.start,r.end,r.payDate,...[r.regular,r.other,r.gross,r.employeeTax,r.employerTax,r.net,r.cost].map(payrollDollars),r.ruleLines.map(l=>l.rule.key+':'+l.rule.side+':'+payrollDollars(l.amount)).join('; '),(r.excludedRules||[]).map(l=>l.key).join('; ')].map(quote).join(',')).join('\r\n')+'\r\n';
+ const header=['run_id','mode','employee_id','employee','period_start','period_end','pay_date','regular_usd','other_usd','gross_usd','employee_tax_usd','employer_tax_usd','net_usd','employer_cost_usd','rule_breakdown','excluded_rules','calculation_version','pay_period_kind','pretax_regular_usd','pretax_other_usd','pretax_total_usd','rule_method_snapshot_json'];
+ return header.join(',')+'\r\n'+runs.map(r=>[r.id,r.mode,r.employee,r.employeeName,r.start,r.end,r.payDate,...[r.regular,r.other,r.gross,r.employeeTax,r.employerTax,r.net,r.cost].map(payrollDollars),r.ruleLines.map(l=>l.rule.key+':'+l.rule.side+':'+payrollDollars(l.amount)).join('; '),(r.excludedRules||[]).map(l=>l.key).join('; '),r.calculationVersion??1,r.periodKind??'full',
+   ...[r.pretaxRegular??0,r.pretaxOther??0,r.pretaxTotal??0].map(payrollDollars),
+   JSON.stringify(r.ruleLines.map(l=>({...l,rule:{...l.rule,...manualRulePolicy(l.rule)}})))].map(quote).join(',')).join('\r\n')+'\r\n';
 }
 export function payrollJournalCsv(runs,accountMap){
- const refs=['wages','employerExpense','net','employeeTax','employerTax'];
+ const refs=['wages','employerExpense','net','employeeTax','employerTax',...(runs.some(r=>r.pretaxTotal>0)?['pretaxPayable']:[])];
  for(const ref of refs)fail(typeof accountMap[ref]==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/.test(accountMap[ref]),'Enter verified chart account codes (1–40 letters, digits, periods, hyphens or underscores).');
  const rows=[];
  for(const r of runs){
-   const lines=[['wages','Gross wage expense',r.gross,0],['employerExpense','Employer tax expense',r.employerTax,0],['net','Net wage payable',0,r.net],['employeeTax','Employee tax payable',0,r.employeeTax],['employerTax','Employer tax payable',0,r.employerTax]];
+   const lines=[['wages','Gross wage expense',r.gross,0],['employerExpense','Employer tax expense',r.employerTax,0],['net','Net wage payable',0,r.net],['employeeTax','Employee tax payable',0,r.employeeTax],['employerTax','Employer tax payable',0,r.employerTax],['pretaxPayable','Entered pre-tax deduction payable',0,r.pretaxTotal??0]];
    fail(lines.reduce((d,x)=>d+x[2]-x[3],0)===0,'Payroll journal does not balance.');
    for(const [ref,memo,dr,cr] of lines)if(dr||cr)rows.push([r.id,r.payDate,accountMap[ref],memo,payrollDollars(dr),payrollDollars(cr)].map(quote).join(','));
  }
@@ -171,7 +223,7 @@ function pdfEsc(t){
 }
 export function manualPaystubPdf(run){
  fail(run?.finalizedAt,'Finalize payroll before downloading a statement.');
- const text=[run.companyName,'MANUAL PAYROLL - PAY STATEMENT','Employee: '+run.employeeName,'Pay date: '+run.payDate+'  Period: '+run.start+' to '+run.end,'Regular earnings: $'+payrollDollars(run.regular)+'  Other earnings: $'+payrollDollars(run.other),'Gross pay: $'+payrollDollars(run.gross),...run.ruleLines.filter(l=>l.rule.side==='employee').map(l=>l.rule.name+': $'+payrollDollars(l.amount)),'Total withheld: $'+payrollDollars(run.employeeTax),'Net pay: $'+payrollDollars(run.net),'Recorded in FirmQuill this calendar year (incl. current): gross $'+payrollDollars(run.priorGross+run.gross)+'; net $'+payrollDollars(run.priorNet+run.net),'Withholding uses company-entered rules. This document does not transfer funds.'];
+ const text=[run.companyName,'MANUAL PAYROLL - PAY STATEMENT','Employee: '+run.employeeName,'Pay date: '+run.payDate+'  Period: '+run.start+' to '+run.end,'Regular earnings: $'+payrollDollars(run.regular)+'  Other earnings: $'+payrollDollars(run.other),'Gross pay: $'+payrollDollars(run.gross),...(run.calculationVersion===2?['Pay period type: '+run.periodKind,'Entered pre-tax deductions: $'+payrollDollars(run.pretaxTotal)]:[]),...run.ruleLines.filter(l=>l.rule.side==='employee').map(l=>l.rule.name+(l.rule.jurisdiction?' ['+l.rule.jurisdiction+']':'')+': $'+payrollDollars(l.amount)),'Total withheld: $'+payrollDollars(run.employeeTax),'Net pay: $'+payrollDollars(run.net),'Recorded in FirmQuill this calendar year (incl. current): gross $'+payrollDollars(run.priorGross+run.gross)+'; net $'+payrollDollars(run.priorNet+run.net),'Withholding uses company-entered rules. This document does not transfer funds.'];
  const wrapped=text.flatMap(line=>line.match(/.{1,78}/g)||['']);
  const pdfHead='%PDF-1.4\n',pages=[];
  for(let i=0;i<wrapped.length;i+=45)pages.push(wrapped.slice(i,i+45));

@@ -27,3 +27,17 @@ Review gross, employee withholding, net and employer tax before finalizing. The 
 First-party JavaScript/module, HTML markup, CSS and build/test script code in this repository is covered. See [LICENSE](LICENSE) for the standard MIT grant ([upstream text](https://opensource.org/license/mit)). Names, logos, other branding, artwork, screenshots, user records, third-party material, legal documents (terms, privacy text and license/notice texts), and substantive legal text embedded in source are excluded from this code grant. No third-party rights are claimed. Separate component licenses and notices remain applicable.
 
 Acceptance applies to this official build or service. It does not limit rights granted by the MIT source-code license or any separate component license. The official agreement remains separate and is available from the app’s Terms of Service control. See THIRD-PARTY-NOTICES.md for the shipping audit.
+
+
+### Employer-entered Manual Payroll
+
+Manual payroll runs offline without activation. Define your own jurisdiction
+labels, distinct rule codes, wage bases, payer, deduction treatment, cent
+rounding and partial-period policy. A label never selects a rate by itself.
+Enter real earnings and any applicable deduction amounts for the actual period.
+The application neither prorates nor annualizes them. No tax tables, filings or
+payments are included in this workflow. The legacy federal estimator is separate
+and does not supply Manual Payroll. Existing finalized records are not rewritten.
+Use a similarly updated Full Suite before transferring new versioned snapshots;
+earlier builds may reject them. The payroll register includes the reviewed rule
+settings, and the journal worksheet remains a separate manual export.

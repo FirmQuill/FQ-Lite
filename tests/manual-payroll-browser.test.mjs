@@ -22,12 +22,18 @@ test('Lite owner prepares and finalizes manual payroll offline, exports and reop
   await p.locator('#company').waitFor();await p.evaluate(()=>navigator.serviceWorker.ready);
   await click('nav','Jobs & time');await click('employee');await fill('name','Synthetic Worker');await choose('state','WA');await fill('locality','Pierce');await fill('rate','25');await submit();
   await context.setOffline(true);
-  await click('nav','Payroll');await click('manual-rule');await fill('key','example');await fill('name','Synthetic Rule');await fill('effective','2027-01-01');await fill('rate','5');await submit();
-  await click('manual-draft');await fill('start','2027-01-01');await fill('end','2027-01-14');await fill('payDate','2027-01-15');await fill('regular','100.00');await submit();
-  await click('manual-finalize');assert.match(await modal.innerText(),/Net \$95\.00/);await modal.locator('[name=reviewed]').check();await submit();
+  await click('nav','Payroll');await click('manual-rule');await fill('key','example');await fill('name','Synthetic <em>Rule</em>');await fill('effective','2027-01-01');await choose('method','brackets');await fill('brackets','0,2\n50,5');await fill('annualCap','1000');await fill('jurisdiction','Fictional <b>Area</b>');await choose('wageBasis','regular');await choose('pretaxTreatment','subtract');await choose('rounding','down');await submit();
+  const ruleRow=p.getByRole('row').filter({hasText:'Synthetic <em>Rule</em>'});
+  await ruleRow.getByText('$50.00',{exact:true}).waitFor();
+  assert.equal(await ruleRow.locator('.money').count(),3);
+  assert.equal(await ruleRow.locator('em,b').count(),0);
+  assert.match(await ruleRow.innerText(),/Fictional <b>Area<\/b>/);
+  assert.doesNotMatch(await ruleRow.innerText(),/<span/);
+  await click('manual-draft');await fill('start','2027-01-01');await fill('end','2027-01-14');await fill('payDate','2027-01-15');await fill('regular','100.00');await fill('pretaxRegular','2.50');await choose('periodKind','partial');await submit();
+  await click('manual-finalize');assert.match(await modal.innerText(),/Net \$94\.13/);await modal.locator('[name=reviewed]').check();await submit();
   const stub=p.waitForEvent('download');await click('manual-stub');const downloaded=await stub;assert.match(await readFile(await downloaded.path(),'ascii'),/^%PDF-1.4/);
-  const exported=p.waitForEvent('download');await click('manual-export');assert.match(await readFile(await (await exported).path(),'utf8'),/"95.00"/);
-  await click('nav','Company setup');const backupEvent=p.waitForEvent('download');await click('backup');const backup=await readFile(await (await backupEvent).path(),'utf8');assert.doesNotMatch(backup,/Synthetic Worker|Synthetic Rule/);
-  await p.reload();await p.locator('#gate-form [name=password]').fill(pass);await p.locator('#gate-form button').click();await p.locator('#company').waitFor();await click('nav','Payroll');assert.match(await p.locator('.workspace').innerText(),/\$95\.00/);
+  const exported=p.waitForEvent('download');await click('manual-export');assert.match(await readFile(await (await exported).path(),'utf8'),/"94.13"/);
+  await click('nav','Company setup');const backupEvent=p.waitForEvent('download');await click('backup');const backup=await readFile(await (await backupEvent).path(),'utf8');assert.doesNotMatch(backup,/Synthetic Worker|Synthetic <em>Rule/);
+  await p.reload();await p.locator('#gate-form [name=password]').fill(pass);await p.locator('#gate-form button').click();await p.locator('#company').waitFor();await click('nav','Payroll');assert.match(await p.locator('.workspace').innerText(),/\$94\.13/);
  }finally{await browser?.close();await new Promise(res=>server.close(res));}
 });
