@@ -37,6 +37,8 @@ export function recommended(flags){return [...new Set([...flags.flatMap(f=>({pro
 export function newBook(title,flags=[]){return {id:id(),name:name(title),activities:[...flags],featured:recommended(flags),sequence:0,closedThrough:'',parties:[],items:[],jobs:[],employees:[],time:[],docs:[],moves:[],entries:[],assets:[],bank:[],reconciliations:[],history:[],attachments:[]};}
 export function newVault(title,flags=[]){return {format:'fieldledger.erp',schema:1,edition:'Lite',currency:'USD',companies:[newBook(title,flags)],groups:[]};}
 export function balance(c,account,through='9999-12-31',from='0001-01-01'){return sum(c.entries.filter(e=>e.date<=through&&e.date>=from).flatMap(e=>e.lines.filter(l=>l.account===account).map(l=>l.cents)));}
+export const cashMovement=entry=>sum(entry.lines.filter(line=>line.account==='1000').map(line=>line.cents));
+export function openingClearedCashIds(company){return new Set(company.reconciliations[0]?.openingBasis?.cleared||[]);}
 export function position(c,item,location,through='9999-12-31'){
   const m=c.moves.filter(x=>x.item===item&&x.location===location&&x.date<=through);
   return {qty:sum(m.map(x=>x.qty)),value:sum(m.map(x=>x.value))};
@@ -272,27 +274,49 @@ export function apply(state,company,action){
         check(!refs.has(row.sourceRef),'Statement includes a duplicate row.');refs.add(row.sourceRef);date(row.date);integer(row.amountCents);
         check(!c.reconciliations.length||row.date>c.reconciliations.at(-1).date,'A new statement line falls within a reconciled statement.');
         check(typeof row.sourceRef==='string'&&row.sourceRef.length>0&&typeof row.description==='string','Invalid bank row.');
-        c.bank.push({id:id(),source:e.id,sourceRef:row.sourceRef,description:row.description,date:row.date,amountCents:row.amountCents,match:''});
+        check(row.statementKey===undefined||(typeof row.statementKey==='string'&&/^[a-f0-9]{64}$/.test(row.statementKey)),'Invalid statement identity.');
+        c.bank.push({id:id(),source:e.id,sourceRef:row.sourceRef,description:row.description,date:row.date,amountCents:row.amountCents,match:'',...(row.statementKey?{statementKey:row.statementKey}:{})});
       }break;
     }
     case 'match':{
       const row=byId(c.bank,a.row),entry=byId(c.entries,a.entry);
       check(!row.match&&!c.bank.some(x=>x.match===a.entry),'Line or entry already matched.');
+      check(!openingClearedCashIds(c).has(entry.id),'This cash entry is already cleared in the opening balance.');
       check(sum(entry.lines.filter(l=>l.account==='1000').map(l=>l.cents))===row.amountCents,'Cash amounts must match.');
       check(e.date>=row.date&&e.date>=entry.date,'Match date precedes one of the records.');row.match=entry.id;break;
     }
     case 'reconcile':{
-      const prev=c.reconciliations.at(-1),opening=prev?.closing??0;
+      const prev=c.reconciliations.at(-1);
       check(!prev||e.date>prev.date,'Choose a later statement closing date.');
-      const rows=c.bank.filter(x=>x.date<=e.date&&!c.reconciliations.some(r=>r.rows.includes(x.id)));
+      const reconciledIds=new Set(c.reconciliations.flatMap(r=>r.rows));
+      const rows=c.bank.filter(x=>x.date<=e.date&&!reconciledIds.has(x.id));
       check(rows.length&&rows.every(r=>r.match&&byId(c.entries,r.match).date<=e.date),'Match every eligible statement line to an entry dated within the cutoff.');
+      let opening=prev?.closing??0,openingBasis;
+      if(a.openingBasis!==undefined){
+        check(!prev,'Only the first reconciliation can establish an opening bank balance.');
+        const basis=a.openingBasis;
+        check(basis&&Array.isArray(basis.outstanding),'Select the opening outstanding entries.');
+        const through=date(basis.through);
+        check(through<e.date,'The opening date must be before the statement ending date.');
+        check(rows.every(r=>r.date>through),'Imported lines overlap the opening date. Choose an earlier opening date or reconcile those lines first.');
+        const priorCash=c.entries.filter(j=>j.date<=through&&cashMovement(j)!==0);
+        const outstanding=new Set(basis.outstanding);
+        check(outstanding.size===basis.outstanding.length&&basis.outstanding.every(k=>priorCash.some(j=>j.id===k)),'An opening outstanding entry is missing or after the opening date.');
+        const cleared=priorCash.filter(j=>!outstanding.has(j.id));
+        const clearedSet=new Set(cleared.map(j=>j.id));
+        check(rows.every(r=>!clearedSet.has(r.match)),'A statement line matches an entry before the opening date. Mark that entry outstanding at opening or choose an earlier opening date.');
+        opening=integer(basis.balance);
+        check(sum(cleared.map(cashMovement))===opening,'The posted cash cleared at opening must equal the opening bank balance.');
+        openingBasis={through,cleared:[...clearedSet]};
+      }
       const closing=integer(a.closing);check(sum([opening,...rows.map(x=>x.amountCents)])===closing,'Opening balance plus statement movement differs from closing balance.');
-      const clearedIds=new Set([...c.reconciliations.flatMap(r=>r.rows),...rows.map(r=>r.id)]);
+      const clearedIds=new Set([...reconciledIds,...rows.map(r=>r.id)]);
       const clearedEntries=new Set(c.bank.filter(r=>clearedIds.has(r.id)).map(r=>r.match));
+      for(const k of openingBasis?.cleared??openingClearedCashIds(c))clearedEntries.add(k);
       const outstandingCash=balance({entries:c.entries.filter(j=>!clearedEntries.has(j.id))},'1000',e.date);
       const bookCash=balance(c,'1000',e.date);
       check(sum([closing,outstandingCash])===bookCash,'Adjusted statement balance differs from book cash.');
-      c.reconciliations.push({id:e.id,date:e.date,opening,closing,outstandingCash,bookCash,rows:rows.map(x=>x.id)});break;
+      c.reconciliations.push({id:e.id,date:e.date,opening,closing,outstandingCash,bookCash,rows:rows.map(x=>x.id),...(openingBasis?{openingBasis}:{})});break;
     }
     case 'attachment':{
       byId(c.history,a.source);check(typeof a.data==='string'&&/^[A-Za-z0-9+/]*={0,2}$/.test(a.data)&&a.data.length<=1400000,'Choose a file up to 1 MB.');
@@ -379,8 +403,18 @@ export function validateState(s){
     for(const t of c.time){date(t.date);byId(c.jobs,t.job);byId(c.employees,t.employee);positive(t.minutes);integer(t.cost);if(t.approved)byId(c.history,t.approval);}
     for(const m of c.moves){date(m.date);byId(c.history,m.source);byId(c.items,m.item);integer(m.qty);integer(m.value);}
     for(const a of c.assets){name(a.name);date(a.date);positive(a.cost);positive(a.months);integer(a.residual);for(const t of a.charges){integer(t.cents);byId(c.history,t.source);}}
-    for(const r of c.bank){date(r.date);integer(r.amountCents);if(r.match)byId(c.entries,r.match);}
-    for(const r of c.reconciliations){date(r.date);integer(r.opening);integer(r.closing);r.rows.forEach(k=>byId(c.bank,k));}
+    for(const r of c.bank){date(r.date);integer(r.amountCents);if(r.match)byId(c.entries,r.match);check(r.statementKey===undefined||(typeof r.statementKey==='string'&&/^[a-f0-9]{64}$/.test(r.statementKey)),'Invalid bank statement identity.');}
+    for(const [i,r] of c.reconciliations.entries()){
+      date(r.date);integer(r.opening);integer(r.closing);r.rows.forEach(k=>byId(c.bank,k));
+      if(r.openingBasis!==undefined){
+        const {through,cleared}=r.openingBasis;
+        check(i===0&&date(through)<r.date&&Array.isArray(cleared)&&new Set(cleared).size===cleared.length,'Invalid opening bank reconciliation basis.');
+        const entries=cleared.map(k=>byId(c.entries,k));
+        check(entries.every(j=>j.date<=through&&cashMovement(j)!==0)&&sum(entries.map(cashMovement))===r.opening,'Invalid opening cash amounts.');
+        const opened=new Set(cleared);
+        check(c.bank.every(b=>!opened.has(b.match)&&b.date>through),'Bank lines overlap cleared opening cash.');
+      }
+    }
     for(const a of c.attachments)byId(c.history,a.source);
     validateDesk(c);
     validatePlanning(c);

@@ -1,3 +1,5 @@
+import {closePrintable,closeSnapshot,closeView,priorPeriod} from './close-workspace.mjs';
+import {cashMovement,openingClearedCashIds} from './core.mjs';
 import {catchUpPlanning,planningCommand} from './planning-core.mjs';
 import {renderPlanning,planningAction} from './planning-views.mjs';
 import {emptyManualPayroll,manualPayrollCommand} from './manual-payroll.mjs';
@@ -5,7 +7,7 @@ import {manualPayrollContent,manualPayrollAction} from './manual-payroll-ui.mjs'
 import {newVault,apply,validateState,recommended,modules,accounts,manualAccounts,outstanding,availableDocumentLines,sum,cents,dollars,check,statements} from './core.mjs';
 import {hasVault,createVault,openVault,restoreVault,MAX_BACKUP_BYTES} from './vault.mjs';
 import {sampleVault} from './sample.mjs';
-import {previewBankCsv,exportBankCsv,reconcileBankStatement} from './interop.mjs';
+import {previewBankCsv,exportBankCsv,reconcileBankStatement,statementFingerprint,bankImportReview} from './interop.mjs';
 import {states,ficaPreview,incomeTaxPreview,payrollGate} from './payroll-rules.mjs';
 import {projectsView,legalView,trackedView,deskAction} from './desk-views.mjs';
 import {esc,btn,money,table,panel,pretty,code,choices,input,options,select,dateField,mapping,acts,brand,home,contacts,commerceView,jobs,warehouse,assetsView,accounting,banks,reportView,payrollView,history,ref,title,line,documentEditor,handleDocumentLine,parseDocumentLines,documentLineSelection,parseSelectedDocumentLines,commercialLineTable} from './views.mjs';
@@ -14,12 +16,13 @@ const app=document.querySelector('#app'),dialog=document.querySelector('dialog')
 let session=null,companyId='',page='Overview',menu=false,existing=false,busy=false,epoch=0,lockTimer,lastActivity=0;
 const timeout=5*60000;
 const localDate=()=>{const now=new Date();return [now.getFullYear(),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0')].join('-');};
+let closeWindow=priorPeriod(localDate());
 let filter={from:'2000-01-01',through:localDate(),group:''};
-const nav=['Overview','Directory',...modules,'Planning','History','Company setup'];
+const nav=['Overview','Directory',...modules,'Planning','Month-end close','History','Company setup'];
 const icons=['⌂','☷','↗','↙','◷','▤','◇','▦','≡','▣','▥','◎','◴','⚙'];
 function toast(s){notice.textContent=s;clearTimeout(toast.timer);toast.timer=setTimeout(()=>notice.textContent='',4100);}
 function showError(err){const out=dialog.open?dialog.querySelector('.error'):app.querySelector('.error');if(out){out.textContent=err.message||String(err);out.scrollIntoView({block:'nearest'});}else toast(err.message);}
-function closeModal(){dialog.close();dialog.replaceChildren();dialog.onsubmit=null;dialog.onchange=null;}
+function closeModal(){dialog.close();dialog.replaceChildren();dialog.removeAttribute("aria-labelledby");dialog.onsubmit=null;dialog.onchange=null;}
 dialog.addEventListener('cancel',ev=>{ev.preventDefault();if(!busy)closeModal();});
 dialog.addEventListener('click',e=>{if(e.target.closest('[data-act="cancel"]')&&!busy)closeModal();});
 function lock(silent=false){
@@ -45,10 +48,10 @@ async function start(s){session=s;existing=true;companyId=s.state.companies[0].i
 function setup(c){return panel('Company profile',`<p><b>${esc(c.name)}</b></p><p class="quiet">${acts.filter(([v])=>c.activities.includes(v)).map(([,n])=>n).join(' · ')||'No activities selected'}</p><div class="rule"></div><p>Featured on overview</p><p>${esc(c.featured.join(' · ')||'None')}</p>`,btn('settings','Edit profile'))+
   panel('Workspaces',`<p>Each company keeps its own contacts, stock, document numbers and journals.</p>`,btn('company','Add company'))+
   panel('Vault recovery',`<p>An encrypted backup includes every company and its attachments. Keep your password somewhere recoverable.</p>`,btn('backup','Download backup')+btn('restore','Restore backup'));}
-const view={'Overview':home,'Directory':contacts,'Sales':c=>commerceView(c,true),'Purchasing':c=>commerceView(c,false),'Projects':projectsView,'Contracts & legal':legalView,'Assets & pallets':trackedView,'Jobs & time':jobs,'Warehouse':c=>warehouse(c,false),'Assembly':c=>warehouse(c,true),'Fixed assets':assetsView,'Accounting':accounting,'Banking':banks,'Reports':reportView,'Payroll':c=>manualPayrollContent({data:c.manualPayroll,employees:c.employees})+payrollView(c),'Planning':c=>renderPlanning(c,localDate()),'History':history,'Company setup':setup};
+const view={'Overview':home,'Directory':contacts,'Sales':c=>commerceView(c,true),'Purchasing':c=>commerceView(c,false),'Projects':projectsView,'Contracts & legal':legalView,'Assets & pallets':trackedView,'Jobs & time':jobs,'Warehouse':c=>warehouse(c,false),'Assembly':c=>warehouse(c,true),'Fixed assets':assetsView,'Accounting':accounting,'Banking':banks,'Reports':reportView,'Payroll':c=>manualPayrollContent({data:c.manualPayroll,employees:c.employees})+payrollView(c),'Planning':c=>renderPlanning(c,localDate()),'Month-end close':c=>closeView(c,closeWindow,localDate()),'History':history,'Company setup':setup};
 function render(){
   if(!session){gate();return;}
-  const s=session.state,c=s.companies.find(x=>x.id===companyId),ord=['Overview','Directory',...c.featured,...modules.filter(m=>!c.featured.includes(m)),'Planning','History','Company setup'];
+  const s=session.state,c=s.companies.find(x=>x.id===companyId),ord=['Overview','Directory',...c.featured,...modules.filter(m=>!c.featured.includes(m)),'Planning','Month-end close','History','Company setup'];
   const navButton=m=>`<button type="button" data-act="nav" data-key="${esc(m)}" class="${m===page?'active':''}" ${m===page?'aria-current="page"':''}><span aria-hidden="true" class="navicon">${icons[nav.indexOf(m)]||'◇'}</span>${esc(m)}</button>`;
   app.innerHTML=`<div class="shell${menu?' menu':''}"><aside>${brand}<nav aria-label="Workspace"><p class="navlabel">Workspace</p>${ord.slice(0,2).map(navButton).join('')}${c.featured.length?'<p class="navlabel">Featured</p>':''}${c.featured.map(navButton).join('')}<p class="navlabel">All tools</p>${ord.slice(2+c.featured.length).map(navButton).join('')}</nav><div class="sidebarfoot small">ERP Lite · Local preview</div></aside><div class="maincol"><header class="toolbar"><div class="toolgroup">${btn('menu','Menu','','mobilemenu')}<label for="company">Company</label><select id="company" aria-label="Active company" class="picker">${options(mapping(s.companies))}</select></div><div class="toolgroup"><span class="quiet small" id="offline-status">${offlineStatus}</span>${btn('lock','Lock vault')}</div></header><div class="workspace"><div class="pagehead"><div><p class="eyebrow">${esc(c.name)}</p><h1>${page==='Overview'?'Workspace overview':esc(page)}</h1></div>${page==='Overview'?btn('quote','New quote','','primary'):''}</div><div class="error" role="alert"></div>${view[page](c,s,filter)}</div></div></div>`;
   app.querySelector('#company').value=companyId;if(page==='Reports')app.querySelector('[name="group"]').value=filter.group;
@@ -67,7 +70,7 @@ async function savePlanning(action){
   if(token!==epoch||session!==current)return;closeModal();render();toast(generated?generated+' recurring draft(s) created.':'Saved to the encrypted vault.');
 }
 function formModal(heading,fields,submit,handler){
-  closeModal();dialog.innerHTML=`<form><h2>${esc(heading)}</h2><div class="fields">${fields}</div><div class="error" role="alert"></div><div class="dialogfoot">${btn('cancel',submit?'Cancel':'Close')}${submit?`<button class="primary" type="submit">${esc(submit)}</button>`:''}</div></form>`;
+  closeModal();dialog.setAttribute("aria-labelledby","fq-main-dialog-title");dialog.innerHTML=`<form><h2 id="fq-main-dialog-title">${esc(heading)}</h2><div class="fields">${fields}</div><div class="error" role="alert"></div><div class="dialogfoot">${btn('cancel',submit?'Cancel':'Close')}${submit?`<button class="primary" type="submit">${esc(submit)}</button>`:''}</div></form>`;
   dialog.showModal();dialog.onsubmit=async ev=>{
     ev.preventDefault();if(busy||!handler)return;busy=true;const token=epoch,form=ev.target,submitter=ev.submitter;if(submitter)submitter.disabled=true;
     const f=new FormData(form);try{await handler(Object.fromEntries(f),f,form);}catch(err){if(epoch===token)showError(err);}finally{if(epoch===token){busy=false;if(submitter)submitter.disabled=false;}}
@@ -149,6 +152,9 @@ function action(type,key){
       form('Post journal',memo+dates+select('debit','Debit account',opts)+select('credit','Credit account',opts)+amount()+select('flow','Cash-flow classification',['Operating','Financing','Investing'].map(x=>[x,x])),v=>{const n=cents(v.amount);check(n>0,'Enter a positive amount.');return {...v,lines:[[v.debit,n],[v.credit,-n]]};},'Post journal');break;
     }
     case 'reverse journal':form('Reverse posted journal',memo+dates,v=>({...v,entry:key}),'Post reversal');break;
+    case 'close-export':{const packet=closeSnapshot(c,closeWindow.from,closeWindow.through);download(closePrintable(packet),'FirmQuill-close-'+closeWindow.through+'.html','text/html;charset=utf-8');break;}
+    case 'close-download-data':{const packet=closeSnapshot(c,closeWindow.from,closeWindow.through);download(JSON.stringify(packet,null,2)+'\n','FirmQuill-close-'+closeWindow.through+'.json','application/json');break;}
+    case 'close-review-confirm':formModal('Close accounting period','<div class="callout warn">Closing prevents new postings through '+esc(closeWindow.through)+'. Existing unresolved items stay open.</div><input type="hidden" name="date" value="'+esc(closeWindow.through)+'"><label class="checkfield"><input type="checkbox" required>I reviewed the close workspace and approve closing.</label>','Close period',v=>save('close',v));break;
     case 'close':form('Close accounting period','<div class="callout warn">Closing prevents new postings through this date. Review journals and statements before closing.</div>'+dateField(now,'date','Close through')+'<label class="checkfield"><input type="checkbox" required>I reviewed the period and approve closing.</label>',v=>v,'Close period');break;
     case 'group':form('Create reporting group',input('name','Group name')+`<fieldset><legend>Member companies</legend>${choices('members',mapping(s.companies))}</fieldset>`,(v,f)=>({...v,members:f.getAll('members')}));break;
     case 'intercompany':form('Charge another company',`<p class="quiet">${esc(c.name)} earns service revenue. The receiving company records the expense and payable.</p>`+list('other','Receiving company',s.companies.filter(x=>x.id!==c.id))+amount()+memo+dates,v=>({...v,amount:cents(v.amount)}),'Post to both books');break;
@@ -158,11 +164,33 @@ function action(type,key){
       download(exportBankCsv(rows,v.profile),'operating-account-'+v.profile+'.csv','text/csv');closeModal();
     });break;
     case 'match':{
-      const r=c.bank.find(x=>x.id===key),eligible=c.entries.filter(e=>!c.bank.some(x=>x.match===e.id)&&sum(e.lines.filter(l=>l.account==='1000').map(l=>l.cents))===r.amountCents);
+      const r=c.bank.find(x=>x.id===key),openingCleared=openingClearedCashIds(c),eligible=c.entries.filter(e=>!openingCleared.has(e.id)&&!c.bank.some(x=>x.match===e.id)&&cashMovement(e)===r.amountCents);
       check(eligible.length,'Record a matching cash transaction in Accounting, Sales or Purchasing first.');
       form('Match bank line',`<p>${esc(r.description)} · ${money(r.amountCents)}</p>`+select('entry','Posted cash entry',eligible.map(e=>[e.id,e.date+' · '+e.memo]))+dates,v=>({...v,row:key}));break;
     }
-    case 'reconcile':form('Reconcile statement',dateField(now,'date','Statement ending date')+amount('closing','Closing statement balance (USD)'),v=>({...v,closing:cents(v.closing)}));break;
+    case 'reconcile':{
+      const cash=c.entries.filter(j=>cashMovement(j)!==0);
+      const prior=c.reconciliations.at(-1);
+      const start=prior?line('Opening from last reconciled statement',prior.closing):
+        '<details><summary>Start from an existing bank balance</summary><p class="quiet">Use this for your first statement when your bank already had a balance. Confirm the opening amount from the bank. In the list, check only cash entries dated on or before the opening date that had not cleared by then.</p>'+
+        '<label>Opening statement date (leave blank to start from zero)<input type="date" name="openingThrough"></label><label>Opening statement balance (USD)<input type="text" inputmode="decimal" name="openingCash" placeholder="0.00"></label>'+
+        '<fieldset data-opening-pending hidden><legend>Still outstanding at opening (optional)</legend><div></div></fieldset></details>';
+      form('Reconcile statement',dateField(now,'date','Statement ending date')+amount('closing','Closing statement balance (USD)')+start,(v,f)=>{
+        const pending=f.getAll('openingPending');
+        check(v.openingThrough||(!v.openingCash&&!pending.length),'Enter an opening statement date or clear the opening details.');
+        return {date:v.date,closing:cents(v.closing),...(v.openingThrough?{openingBasis:{through:v.openingThrough,balance:cents(v.openingCash||'0.00'),outstanding:pending}}:{})};
+      });
+      if(!prior){
+        const dateInput=dialog.querySelector('[name=openingThrough]'), fieldset=dialog.querySelector('[data-opening-pending]');
+        dateInput.addEventListener('input',()=>{
+          const selected=[...fieldset.querySelectorAll('input:checked')].map(x=>x.value);
+          const eligible=dateInput.value?cash.filter(j=>j.date<=dateInput.value):[];
+          fieldset.hidden=!eligible.length;
+          fieldset.querySelector('div').innerHTML=choices('openingPending',eligible.map(j=>[j.id,j.date+' · '+j.memo+' · '+money(cashMovement(j))]),selected);
+        });
+      }
+      break;
+    }
     case 'worksheet':worksheet(c,key);break;
     case 'detail':detail(c,key);break;
     case 'print document':window.print();break;
@@ -188,13 +216,22 @@ function detail(c,id){
 function importForm(c){
   const acct=c.id,token=epoch;formModal('Preview statement import',select('profile','File layout',[['wave','Wave · YYYY-MM-DD'],['quickbooks','QuickBooks Online · DD/MM/YYYY']])+input('file','Statement CSV','file','','accept=".csv,text/csv"')+input('opening','Statement opening balance (USD)','text','0.00')+input('closing','Statement closing balance (USD)','text',''),'Preview',async v=>{
     check(v.file.size<=2000000,'File exceeds 2 MB.');const raw=await v.file.text();if(epoch!==token)return;
-    const p=previewBankCsv(raw,v.profile,c.bank),r=reconcileBankStatement(p,cents(v.opening),cents(v.closing));
-    const skipped=new Set(p.skipped.map(x=>x.sourceRef));
-    const body=`<p>${p.added.length} new · ${p.skipped.length} already imported</p>`+line('Movement',p.totalCents)+line('Calculated closing',r.computedClosingCents)+line('Difference',r.differenceCents)+
-      table(['Date','Description','Amount','Action'],p.rows.map(x=>[x.date,esc(x.description),money(x.amountCents),skipped.has(x.sourceRef)?'Skip duplicate':'Import']))+
+    const opening=cents(v.opening),closing=cents(v.closing);
+    const p=previewBankCsv(raw,v.profile,c.bank),r=reconcileBankStatement(p,opening,closing);
+    const statementKey=await statementFingerprint(p,opening,closing);if(epoch!==token)return;
+    const plan=bankImportReview(p,c.bank,statementKey),ambiguous=plan.decisions.includes('ambiguous');
+    const body=`<p>${p.added.length} new · ${p.skipped.length} possible or known duplicates</p>`+line('Movement',p.totalCents)+line('Calculated closing',r.computedClosingCents)+line('Difference',r.differenceCents)+
+      table(['Date','Description','Amount','Action'],p.rows.map((x,index)=>[x.date,esc(x.description),money(x.amountCents),
+        plan.decisions[index]==='new'?'Import':plan.decisions[index]==='recorded'?'Skip: previously confirmed separate':r.balanced&&plan.decisions[index]==='ambiguous'?
+          `<label><input type="checkbox" name="distinct" value="${index}"> Confirm row ${index+2} is a separate transaction</label>`:'Skip duplicate']))+
+      (r.balanced&&ambiguous?'<p class="callout warn">Rows with the same date, description and amount are skipped unless you check a row that you independently verified as another transaction on the bank statement. Never check a repeated upload.</p>':'')+
       (!r.balanced?'<div class="callout warn">Resolve the closing balance difference before import.</div>':'');
-    formModal('Review statement lines',body,(r.balanced&&p.added.length)?'Import lines':'',async()=>{
-      check(companyId===acct,'Company changed.');const fresh=session.state.companies.find(b=>b.id===acct);const rows=previewBankCsv(raw,v.profile,fresh.bank).added;
+    formModal('Review statement lines',body,(r.balanced&&(p.added.length||ambiguous))?'Import lines':'',async(_,f)=>{
+      check(companyId===acct,'Company changed.');const fresh=session.state.companies.find(b=>b.id===acct);
+      const checkPreview=previewBankCsv(raw,v.profile,fresh.bank);
+      check(reconcileBankStatement(checkPreview,opening,closing).balanced,'Statement control totals changed.');
+      const rows=bankImportReview(checkPreview,fresh.bank,statementKey,f.getAll('distinct')).rows;
+      check(rows.length,'No new lines selected. Leave repeated transactions unchecked.');
       await save('statement import',{rows,label:'Bank CSV import'});
     });
   });
@@ -226,6 +263,8 @@ app.addEventListener('submit',async ev=>{
   try{if(form.id==='gate-form'){
     if(!existing)check(v.password===v.confirm,'Passwords differ.');
     await start(existing?await openVault(v.password,validateState):await createVault(v.password,newVault(v.name,f.getAll('activities')),validateState));
+  }else if(form.id==='close-filter'){
+    statements([],v.from,v.through);check(v.through<=localDate(),'The selected cutoff is in the future.');closeWindow={from:v.from,through:v.through};render();
   }else if(form.id==='report-filter'){
     statements([],v.from,v.through);filter={from:v.from,through:v.through,group:v.group};render();
   }}catch(err){showError(err);}finally{busy=false;if(b)b.disabled=false;}

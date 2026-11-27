@@ -1,7 +1,7 @@
 const scope=self.registration.scope;
 const prefix='fieldledger-lite:'+encodeURIComponent(new URL(scope).pathname)+':';
-const cacheName=prefix+'c889e1f086a0d072958c';
-const shell=["terms.mjs","terms-ui.mjs","terms-entry.mjs","terms.css","index.html","mark.svg","headquarters.png","app.css","app.mjs","core.mjs","desk-core.mjs","warehouse-desk.mjs","desk-views.mjs","planning-core.mjs","planning-views.mjs","views.mjs","sample.mjs","vault.mjs","interop.mjs","payroll-rules.mjs","manual-payroll.mjs","manual-payroll-ui.mjs","terms.json","privacy.html","privacy.css","consent.mjs","LICENSE","THIRD-PARTY-NOTICES.md"];
+const cacheName=prefix+'17c98a9a140dda572282';
+const shell=["terms.mjs","terms-ui.mjs","terms-entry.mjs","terms.css","index.html","mark.svg","headquarters.png","app.css","app.mjs","close-workspace.mjs","core.mjs","desk-core.mjs","warehouse-desk.mjs","desk-views.mjs","planning-core.mjs","planning-views.mjs","views.mjs","sample.mjs","vault.mjs","interop.mjs","payroll-rules.mjs","manual-payroll.mjs","manual-payroll-ui.mjs","terms.json","privacy.html","privacy.css","consent.mjs","LICENSE","THIRD-PARTY-NOTICES.md"];
 const urls=shell.map(name=>new URL(name,scope).href);
 self.addEventListener('install',event=>event.waitUntil((async()=>{
   const cache=await caches.open(cacheName);

@@ -155,3 +155,37 @@ export function reconcileBankStatement(preview, openingCents, closingCents) {
   return {computedClosingCents, differenceCents, balanced: differenceCents === 0};
 }
 
+
+// A reviewed file's identity does not depend on its filename, CSV quoting, or source layout.
+export async function statementFingerprint(preview,opening,closing) {
+  const rows=preview.rows.map(row=>[row.date,row.description,row.amountCents]);
+  const bytes=new TextEncoder().encode(JSON.stringify(['firmquill-bank-v1',opening,closing,rows]));
+  const digest=await crypto.subtle.digest('SHA-256',bytes);
+  return Array.from(new Uint8Array(digest),x=>x.toString(16).padStart(2,'0')).join('');
+}
+
+export function bankImportReview(preview,existingRows,statementKey,confirmed=[]) {
+  if(!/^[a-f0-9]{64}$/.test(statementKey))throw Error('Invalid bank statement fingerprint.');
+  if(!Array.isArray(confirmed)||new Set(confirmed).size!==confirmed.length)throw Error('Invalid bank statement review selections.');
+  const known=new Set(existingRows.map(row=>row.sourceRef));
+  const sameStatement=existingRows.some(row=>row.statementKey===statementKey);
+  const skipped=new Set(preview.skipped.map(row=>row.sourceRef));
+  const candidates=new Set();
+  const picked=new Set(confirmed);
+  const rows=[];
+  const decisions=preview.rows.map((row,index)=>{
+    const indexKey=String(index);
+    const reviewedRef='bank-reviewed/v1/'+statementKey+'/'+indexKey;
+    if(known.has(reviewedRef))return 'recorded';
+    if(!skipped.has(row.sourceRef)){
+      rows.push({...row,statementKey});
+      return 'new';
+    }
+    if(sameStatement)return 'duplicate';
+    candidates.add(indexKey);
+    if(picked.has(indexKey))rows.push({...row,sourceRef:reviewedRef,statementKey});
+    return 'ambiguous';
+  });
+  if(confirmed.some(row=>!candidates.has(row)))throw Error('The review selections changed. Preview the statement again.');
+  return {rows,decisions};
+}
